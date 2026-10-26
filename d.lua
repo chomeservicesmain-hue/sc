@@ -27669,6 +27669,7 @@ _0xa299._0xHLWNCP = {
     busy             = false,   -- a cycle is live; the Heartbeat must stand off
     unavailableUntil = 0,       -- board was not offering it; recheck after this
     abortRequested   = false,  -- raised by the Heartbeat while a cycle runs
+    spawnedPoint     = nil,    -- exempt from the pumpkin-only filter
     cycles           = 0,
 }
 
@@ -27866,6 +27867,7 @@ function _0xa299._0xHLWNCPCycle()
     --    substring as a backstop for a reskin we have not catalogued -- the
     --    same pair of tests the Corrupted Point quest uses.
     local pointCF
+    local pointModel
     local findDeadline = tick() + 8
     local findAbort
     repeat
@@ -27885,6 +27887,11 @@ function _0xa299._0xHLWNCPCycle()
                         and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")))
                 if part and (not myPos or (part.Position - myPos).Magnitude <= 120) then
                     pointCF = part.CFrame
+                    -- Remembered so the farm will take it even under "Only
+                    -- Target Pumpkin versions": the mission can spawn a BASE
+                    -- Corrupted Point, and discarding what we just spawned
+                    -- would loop forever. See _0xHLWNPointMatch.
+                    pointModel = obj
                     break
                 end
             end
@@ -27910,6 +27917,12 @@ function _0xa299._0xHLWNCPCycle()
     if a then return bail(a) end
 
     -- 6. Back to it, and hand over to the farm's normal point handling.
+    --
+    -- Claimed BEFORE travelling, so the farm's finder already accepts it by the
+    -- time we land. It re-streams as a fresh instance, so this reference can go
+    -- stale - that is fine, _0xHLWPT re-acquires by name and the exemption only
+    -- has to cover the first look.
+    S.spawnedPoint = pointModel
     _0xa299._0xSTP(pointCF)
     S.cycles = S.cycles + 1
     _0xa299._0xHLWNScanReset()
@@ -28674,41 +28687,74 @@ function _0xa299._0x052d(point, range)
     return false
 end
 
+-- Only farm the Halloween reskin, ignoring base Corrupted Points.
+_0xa299._0xHLWNPumpkinOnly = false
+
+-- One place that decides whether a workspace model is a point we will farm, so
+-- the finder and the streamed-out re-acquire cannot disagree about it.
+--
+-- The model argument carries an exemption: a point the Corrupted Point method
+-- just spawned is always farmable, whatever the toggle says. Without that,
+-- turning on "Only Target Pumpkin versions" while that method is running is a
+-- trap - the mission can spawn a BASE Corrupted Point, the toggle would
+-- discard it, and the farm would spawn point after point and never farm one.
+function _0xa299._0xHLWNPointMatch(model, name)
+    name = name or (model and model.Name) or ""
+    if model and _0xa299._0xHLWNCP and model == _0xa299._0xHLWNCP.spawnedPoint then
+        return true
+    end
+    if _0xa299._0xHLWNPumpkinOnly then return name == "PumpkinPoint" end
+    return _0xa299._0xIsEventName(name, "CorruptedPoint")
+end
+
+-- A point we are willing to farm.
+--
+-- This used to be a single workspace:FindFirstChild("PumpkinPoint"), which was
+-- a real problem for the Corrupted Point method: that mission spawns a BASE
+-- "CorruptedPoint", not a PumpkinPoint, so the farm could not see the very
+-- thing the method had just gone and spawned. It reported no point, swept the
+-- map, and ran another cycle - spawning points forever and farming none.
+--
+-- So every variant counts now (_0xEventVariants: CorruptedPoint, PumpkinPoint,
+-- PresentPoint) and _0xHLWNPumpkinOnly narrows it back to the Halloween one.
+--
+-- It also no longer assumes there is only ONE in the world. The old form took
+-- whatever FindFirstChild happened to return and gave up entirely if that one
+-- was destroyed, skipped or in a snowstorm - even with a good point standing
+-- right next to it. This walks the candidates and takes the nearest usable.
 function _0xa299._0xd574()
-    local allPoints = {}
     local now = tick()
-    
-    -- PumpkinPoint is a single Model in workspace (not a folder of points)
-    -- It has children like Rock, Health, Main, Destroyed, etc.
-    local pumpkinPoint = workspace:FindFirstChild("PumpkinPoint")
-    if not pumpkinPoint then
-        return nil
+    local char = _0xa299._0x396d.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+    local function usable(m)
+        -- Points have children like Rock, Health, Main, Destroyed.
+        local destroyed = m:FindFirstChild("Destroyed")
+        if destroyed and destroyed:IsA("BoolValue") and destroyed.Value == true then
+            return false
+        end
+        local skipData = _0xa299._0xb81e.skippedPoints[m]
+        if skipData and (now - skipData.time) < 30 then return false end
+        if _0xa299._0x052d(m, 200) then return false end          -- snowstorm
+        return true
     end
-    
-    -- Check if this PumpkinPoint is destroyed
-    local destroyed = pumpkinPoint:FindFirstChild("Destroyed")
-    if destroyed and destroyed:IsA("BoolValue") and destroyed.Value == true then
-        return nil
-    end
-    
-    -- Check if skipped
-    local skipData = _0xa299._0xb81e.skippedPoints[pumpkinPoint]
-    local isSkipped = skipData and (now - skipData.time) < 30
-    if isSkipped then
-        return nil
-    end
-    
+
     -- Player proximity is handled by the main loop, which also honours the
     -- Safe Teleport toggle. A full _0xPlayerNearPoint scan used to sit here
     -- with its result thrown away - an empty if-body - so it walked every
     -- player in the server on every call and changed nothing.
-    
-    -- Check for snowstorm
-    if _0xa299._0x052d(pumpkinPoint, 200) then
-        return nil
+
+    local best, bestD
+    for _, m in ipairs(workspace:GetChildren()) do
+        if _0xa299._0xHLWNPointMatch(m) and usable(m) then
+            if not hrp then return m end
+            local part = m:IsA("BasePart") and m
+                or (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart"))
+            local d = part and (part.Position - hrp.Position).Magnitude or math.huge
+            if not bestD or d < bestD then best, bestD = m, d end
+        end
     end
-    
-    return pumpkinPoint
+    return best
 end
 
 function _0xa299._0xf63f()
@@ -28926,8 +28972,17 @@ function _0xa299._0xHLWPT(point)
     S.pointMissingSince = S.pointMissingSince or tick()
 
     -- It re-streams as a FRESH instance, so the reference we were holding
-    -- stays detached forever - look the point up again by name instead.
-    local fresh = _0xa299._0xFindEvent("CorruptedPoint")
+    -- stays detached forever - look the point up again instead. Through
+    -- _0xHLWNPointMatch, so this honours "Only Target Pumpkin versions" the
+    -- same way the finder does rather than re-acquiring a point the finder
+    -- would have refused.
+    local fresh
+    for _, m in ipairs(workspace:GetChildren()) do
+        if _0xa299._0xHLWNPointMatch(m) then
+            fresh = m
+            break
+        end
+    end
     if fresh then
         S.currentPoint = fresh
         S.pointMissingSince = nil
@@ -30375,6 +30430,7 @@ function _0xa299._0xefc6()
     -- switched off would leave the Heartbeat standing off for good next time.
     _0xa299._0xHLWNCP.busy = false
     _0xa299._0xHLWNCP.unavailableUntil = 0
+    _0xa299._0xHLWNCP.spawnedPoint = nil
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
     _0xa299._0xb81e.isRecoveringHP = false
@@ -30658,6 +30714,11 @@ _0xa299._0xHLWN:AddToggle("Corrupted Point Method If None", false, function(Valu
     if Value then _0xa299._0xHLWNCP.unavailableUntil = 0 end
 end, {Flag = "HLWNCPMethod", Type = "info",
       Text = "spawns a point from the quest when none are up"})
+
+_0xa299._0xHLWN:AddToggle("Only Target Pumpkin versions", false, function(Value)
+    _0xa299._0xHLWNPumpkinOnly = Value
+end, {Flag = "HLWNPumpkinOnly", Type = "info",
+      Text = "ignores normal corrupted points, halloween ones only"})
 
 _0xa299._0xHLWN:AddToggle("Halloween Hop if None", false, function(Value)
     _0xa299._0xb81e.serverHopIfNone = Value
