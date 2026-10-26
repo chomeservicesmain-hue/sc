@@ -22326,36 +22326,36 @@ function _0xa299._0xChakraEval()
                                     _0xa299._0x8545:Notify("Chakra Sense", playerName .. " is no longer observing you", 3, "eye")
                                     _0xa299._0x3ea5("8551372796") -- Sound when they stop observing
                                     
-                                    -- Track flicker for boss farm (chakra sense toggled off)
-                                    if _0xa299._0x1915 and _0xa299._0x1915.serverHopIfFlickerObserved and _0xa299._0x1915.farming then
-                                        if not _0xa299._0x1915.flickerObserveTimes[playerName] then
-                                            _0xa299._0x1915.flickerObserveTimes[playerName] = {}
-                                        end
-                                        table.insert(_0xa299._0x1915.flickerObserveTimes[playerName], tick())
-                                        
-                                        -- Remove timestamps older than 4 seconds
-                                        local now = tick()
-                                        local recentTimes = {}
-                                        for _, t in ipairs(_0xa299._0x1915.flickerObserveTimes[playerName]) do
-                                            if now - t <= 4 then
-                                                table.insert(recentTimes, t)
-                                            end
-                                        end
-                                        _0xa299._0x1915.flickerObserveTimes[playerName] = recentTimes
-                                        
-                                        -- Check if 4+ toggles in 4 seconds
-                                        if #recentTimes >= 4 and not _0xa299._0x1915.isServerHopping then
+                                    -- Track flicker: a sensor toggling Chakra Sense on and off is
+                                    -- probing to see whether we react. Shared by both farms now, so
+                                    -- the window and the threshold cannot drift apart between them.
+                                    -- See _0xa299._0xFlickerSeen.
+                                    _0xa299._0xFlickerSeen(_0xa299._0x1915, playerName,
+                                        _0xa299._0x1915 and _0xa299._0x1915.farming, function(who)
+                                            if _0xa299._0x1915.isServerHopping then return false end
                                             _0xa299._0x1915.isServerHopping = true
                                             _0xa299._0x1915.playerNearby = true
-                                            _0xa299._0x8545:Notify("Farm", playerName .. " is flickering chakra sense - Server hopping...", 3, "warning")
+                                            _0xa299._0x8545:Notify("Farm",
+                                                who .. " is flickering chakra sense - Server hopping...", 3, "warning")
                                             task.spawn(function()
                                                 task.wait(2)
-                                                if _0xa299._0x1915.farming then
-                                                    _0xa299._0xb5ef()
-                                                end
+                                                if _0xa299._0x1915.farming then _0xa299._0xb5ef() end
                                             end)
-                                        end
-                                    end
+                                            return true
+                                        end)
+                                    
+                                    _0xa299._0xFlickerSeen(_0xa299._0xb81e, playerName,
+                                        _0xa299._0xb81e and _0xa299._0xb81e.enabled, function(who)
+                                            if _0xa299._0xb81e.serverHopPending then return false end
+                                            _0xa299._0xb81e.serverHopPending = true
+                                            _0xa299._0x8545:Notify("Farm",
+                                                who .. " is flickering chakra sense - Server hopping...", 3, "warning")
+                                            task.spawn(function()
+                                                task.wait(2)
+                                                if _0xa299._0xb81e.enabled then _0xa299._0xb5ef() end
+                                            end)
+                                            return true
+                                        end)
                                     
                                     -- Only clear flag if NO ONE ELSE is observing
                                     local stillBeingObserved = false
@@ -27461,6 +27461,13 @@ _0xa299._0xb81e = {
     serverHopIfNone = false,
     serverHopIfObserved = false,
     serverHopIfPlayerDetected = false,
+    -- Chakra-sense timeout, the Boss Farm's "Server Hop if Timeout": hop after
+    -- being OBSERVED this long, rather than waiting for the sensor to leave.
+    serverHopIfObservedPastDuration = false,
+    serverHopObservedDuration = 30,
+    observedStartTime = nil,
+    serverHopIfFlickerObserved = false,  -- see _0xa299._0xFlickerSeen
+    flickerObserveTimes = {},
     serverHopPending = false,
     heartbeatConnection = nil,
     noclipConnection = nil,
@@ -27477,6 +27484,8 @@ _0xa299._0xb81e = {
     originalNoFallDamage = nil,
     method = "PumpkinPoint",
     methodExhausted = {},      -- name -> tick() it gave up; see _0xHLWNHandOver
+    bossHealthMem = nil,       -- last seen boss HP, for the damage timeout
+    bossDamageAt = nil,        -- tick() of the last damage dealt
     hiding = false,
     playerHiding = false,
     isRecoveringHP = false,
@@ -27656,6 +27665,8 @@ function _0xa299._0xHLWNHandOver(reason)
     B.safespotWaitEndTime = nil
     B.bossLootCollecting = false
     B.bossGripped = false
+    B.bossHealthMem = nil
+    B.bossDamageAt = nil
     _0xa299._0xHLWNScanReset()
 
     _0xa299._0x8545:Notify("Farm",
@@ -28246,6 +28257,10 @@ end
 -- farm's Heartbeat: without it every frame would start another trip. The
 -- revisit window then stops it walking to the same arena over and over.
 ---------------------------------------------------------------------
+-- Seconds of ACTIVE farming with no damage dealt to the boss before the farm
+-- gives up on it. Safespot / hiding / HP-recovery time does not count.
+_0xa299._0xHLWNBossStall = 40
+
 _0xa299._0xHLWNArenaRevisit = 20   -- seconds before walking to the same arena again
 _0xa299._0xHLWNArena = { visiting = false, at = {}, abort = false }
 
@@ -30028,10 +30043,54 @@ function _0xa299._0xc0db()
                     return
                 end
             end
+
+            -- CHAKRA SENSE TIMEOUT. The Boss Farm's "Server Hop if Timeout":
+            -- rather than waiting for the sensor to give up, leave once we have
+            -- been observed for this long.
+            --
+            -- Gated on _0x2008 so a stale observed flag with the notifier off
+            -- cannot fire it, the same way the Boss Farm gates it.
+            --
+            -- This is also the escape hatch the Halloween hide never had. The
+            -- observed flag is re-asserted for as long as ANYONE has Chakra
+            -- Sense equipped, not just while they are actively sensing, so
+            -- without a timeout the farm could sit hidden indefinitely with no
+            -- way back.
+            if _0xa299._0xb81e.serverHopIfObservedPastDuration
+               and _0xa299._0x2008
+               and not _0xa299._0xb81e.serverHopPending then
+                if not _0xa299._0xb81e.observedStartTime then
+                    _0xa299._0xb81e.observedStartTime = tick()
+                else
+                    local observedFor = tick() - _0xa299._0xb81e.observedStartTime
+                    if observedFor >= (_0xa299._0xb81e.serverHopObservedDuration or 30) then
+                        _0xa299._0xb81e.serverHopPending = true
+                        _0xa299._0xb81e.observedStartTime = nil
+                        _0xa299._0xded8("server_hopping", "", "")
+                        _0xa299._0x8545:Notify("Farm", "Observed for "
+                            .. math.floor(observedFor) .. "s - Server hopping...", 3, "info")
+                        hrp.CFrame = _0xa299._0xdde4()
+                        task.spawn(function()
+                            task.wait(1)
+                            pcall(function() _0xa299._0x220a.removeSpoofProtection() end)
+                            if _0xa299._0xb81e.enabled then
+                                _0xa299._0xb5ef()
+                            else
+                                _0xa299._0xb81e.serverHopPending = false
+                            end
+                        end)
+                        return
+                    end
+                end
+            end
+
             _0xa299._0xded8("hiding", "", "")
             hrp.CFrame = _0xa299._0xdde4()
             return
         else
+            -- Not observed: reset the timeout so it measures one continuous
+            -- stretch of being watched rather than a lifetime total.
+            _0xa299._0xb81e.observedStartTime = nil
             if _0xa299._0xb81e.hiding then
                 _0xa299._0xb81e.hiding = false
                 -- Remove spoof protection when threat is gone
@@ -30788,6 +30847,73 @@ function _0xa299._0xc0db()
             local bossHP = math.floor(humanoid.Health)
             local bossMaxHP = math.floor(humanoid.MaxHealth)
             _0xa299._0xded8("boss_farming", boss.Name, bossHP .. "/" .. bossMaxHP)
+
+            ---------------------------------------------------------------
+            -- DAMAGE TIMEOUT
+            --
+            -- These methods had none. If the boss stopped taking damage - M1
+            -- broken, out of reach, wedged in geometry - the farm hovered there
+            -- indefinitely. The Pumpkin Point path has stall timers for its
+            -- NPCs and points, and the Boss Farm has this exact check at 30s;
+            -- the Halloween boss branch was the one place with nothing.
+            --
+            -- Time at the safespot does NOT count, which is the whole reason
+            -- the Boss Farm grew a holdDamageTimer helper: the timer used to
+            -- keep running while parked and then fired the instant farming
+            -- resumed, so sitting out a chakra sensor ended in a bogus hop.
+            -- Hiding, a nearby player, HP recovery, a pending hop and an arena
+            -- trip all hold it here.
+            --
+            -- Clearing the remembered health on hold forces a fresh baseline on
+            -- resume, since the boss may have regenerated while we were away.
+            ---------------------------------------------------------------
+            local heldFor = _0xa299._0xHLWNUnsafe()
+                or (_0xa299._0xHLWNArena.visiting and "arena trip")
+            if heldFor then
+                _0xa299._0xb81e.bossDamageAt = tick()
+                _0xa299._0xb81e.bossHealthMem = nil
+            elseif _0xa299._0xb81e.bossHealthMem == nil
+                   or humanoid.Health < _0xa299._0xb81e.bossHealthMem then
+                -- First look at this boss, or it just took damage.
+                _0xa299._0xb81e.bossHealthMem = humanoid.Health
+                _0xa299._0xb81e.bossDamageAt = tick()
+            elseif tick() - (_0xa299._0xb81e.bossDamageAt or tick())
+                   > (_0xa299._0xHLWNBossStall or 40) then
+                _0xa299._0xb81e.bossHealthMem = nil
+                _0xa299._0xb81e.bossDamageAt = nil
+
+                -- Park first, then leave. Latch BEFORE hopping so the heartbeat
+                -- knows one is in flight and stops attacking through it.
+                _0xa299._0xVelSettle(hrp)
+                hrp.CFrame = _0xa299._0xdde4()
+
+                if _0xa299._0xb81e.serverHopIfNone and not _0xa299._0xb81e.serverHopPending then
+                    _0xa299._0xb81e.serverHopPending = true
+                    _0xa299._0xded8("server_hopping", "", "")
+                    _0xa299._0x8545:Notify("Farm",
+                        bossLabel .. " took no damage for "
+                        .. tostring(_0xa299._0xHLWNBossStall or 40)
+                        .. "s, server hopping", 3, "warning")
+                    task.spawn(function()
+                        task.wait(1)
+                        _0xa299._0xb5ef()
+                    end)
+                    return
+                end
+
+                -- Hopping off: give the work to another method instead, and
+                -- only sit here if there is nowhere to go.
+                if _0xa299._0xHLWNHandOver(bossLabel .. " took no damage for "
+                        .. tostring(_0xa299._0xHLWNBossStall or 40) .. "s") then
+                    return
+                end
+
+                _0xa299._0x8545:Notify("Farm",
+                    bossLabel .. " took no damage for "
+                    .. tostring(_0xa299._0xHLWNBossStall or 40)
+                    .. "s, waiting", 3, "warning")
+                return
+            end
             
             -- Auto pickup Candy while fighting boss
             if _0xa299._0xb81e.autoPickup then
@@ -30888,6 +31014,10 @@ function _0xa299._0xefc6()
     _0xa299._0xHLWNArena.at = {}
     -- Both methods start fresh next run.
     _0xa299._0xb81e.methodExhausted = {}
+    _0xa299._0xb81e.bossHealthMem = nil
+    _0xa299._0xb81e.bossDamageAt = nil
+    _0xa299._0xb81e.flickerObserveTimes = {}
+    _0xa299._0xb81e.observedStartTime = nil
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
     _0xa299._0xb81e.isRecoveringHP = false
@@ -31214,6 +31344,28 @@ end)
 _0xa299._0xHLWN:AddToggle("Halloween Hop If Observed", false, function(Value)
     _0xa299._0xb81e.serverHopIfObserved = Value
 end)
+
+-- The Boss Farm's "Server Hop if Timeout", same shape: a toggle plus the
+-- duration under it. Needs "Hop If Observed" OFF, since that one leaves the
+-- moment it sees a sensor and this one never gets a chance to time anything.
+_0xa299._0xHLWN:AddToggle("Halloween Hop If Timeout", false, function(Value)
+    _0xa299._0xb81e.serverHopIfObservedPastDuration = Value
+    if not Value then _0xa299._0xb81e.observedStartTime = nil end
+end, {Flag = "HLWNHopObserveTimeout", Type = "warning",
+      Text = "needs the chakra sense notifier on, and hop if observed off"})
+    :AddSettings("Halloween Observe Timeout")
+    :AddSlider("Halloween Observed Duration (seconds)", 1, 60, 30, function(Value)
+        _0xa299._0xb81e.serverHopObservedDuration = Value
+    end)
+
+
+_0xa299._0xHLWN:AddToggle("Halloween Hop If Flicker Observed", false, function(Value)
+    _0xa299._0xb81e.serverHopIfFlickerObserved = Value
+    -- Fresh count when switched on, so toggles seen earlier cannot trip it
+    -- the moment it is enabled.
+    if Value then _0xa299._0xb81e.flickerObserveTimes = {} end
+end, {Flag = "HLWNHopFlicker", Type = "info",
+      Text = "hops if someone spams chakra sense on and off"})
 
 _0xa299._0xHLWN:AddToggle("Halloween Hop If Player", false, function(Value)
     _0xa299._0xb81e.serverHopIfPlayerDetected = Value
