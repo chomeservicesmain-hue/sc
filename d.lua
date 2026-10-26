@@ -27476,6 +27476,7 @@ _0xa299._0xb81e = {
     animTrack = nil,
     originalNoFallDamage = nil,
     method = "PumpkinPoint",
+    methodExhausted = {},      -- name -> tick() it gave up; see _0xHLWNHandOver
     hiding = false,
     playerHiding = false,
     isRecoveringHP = false,
@@ -27527,6 +27528,97 @@ _0xa299._0x891f = {
     "PumpkinPoint",
     "Barbarit The Hallowed",
 }
+
+---------------------------------------------------------------------
+-- RUNNING BOTH METHODS
+--
+-- Both can be selected now. The order is Barbarit first, then Pumpkin Point,
+-- then round again, and the server hop only happens once BOTH have nothing
+-- left - which is the point of running them together.
+--
+-- _0xb81e.method stays exactly what it was: the method running RIGHT NOW. The
+-- two big branches in the heartbeat are untouched and still just read it. All
+-- this adds is who sets it, which keeps a 500-line pair of branches out of the
+-- change.
+--
+-- Handing over is driven from the places that already decided "nothing here" -
+-- Barbarit's 7s spawn timeout and its wrong-boss case, and Pumpkin Point's
+-- exhausted scan sweep. Each of those used to go straight to the hop; now they
+-- offer the work to the other method first.
+--
+-- methodExhausted stops the two ping-ponging. A method that gives up is
+-- stamped, and is not handed back to until _0xHLWNMethodRetry has passed, so
+-- "both empty" settles into the hop instead of flipping every frame.
+---------------------------------------------------------------------
+_0xa299._0xHLWNMethods     = {}   -- selected set, from the Farm Methods dropdown
+_0xa299._0xHLWNMethodRetry = 60   -- seconds before a method that gave up is retried
+_0xa299._0xHLWNOther = {
+    ["PumpkinPoint"]          = "Barbarit The Hallowed",
+    ["Barbarit The Hallowed"] = "PumpkinPoint",
+}
+
+function _0xa299._0xHLWNMethodOn(name)
+    local sel = _0xa299._0xHLWNMethods
+    -- Nothing picked at all: fall back to whatever is current, so an empty
+    -- dropdown runs the farm rather than silently doing nothing.
+    if type(sel) ~= "table" or next(sel) == nil then
+        return _0xa299._0xb81e.method == name
+    end
+    return sel[name] == true
+end
+
+function _0xa299._0xHLWNMethodFresh(name)
+    local t = _0xa299._0xb81e.methodExhausted[name]
+    if not t then return true end
+    return (tick() - t) >= (_0xa299._0xHLWNMethodRetry or 60)
+end
+
+-- The current method found something, so it is live again.
+function _0xa299._0xHLWNMethodWorking()
+    _0xa299._0xb81e.methodExhausted[_0xa299._0xb81e.method] = nil
+end
+
+-- Current method has nothing to do. Hand over to the other one if it is
+-- selected and not itself exhausted.
+--
+-- Returns true when it handed over, which means the caller must return and let
+-- the new method run. False means there is nowhere to go, and the caller should
+-- carry on into its existing hop-or-wait path exactly as before.
+function _0xa299._0xHLWNHandOver(reason)
+    local B = _0xa299._0xb81e
+    local cur = B.method
+    B.methodExhausted[cur] = tick()
+
+    local other = _0xa299._0xHLWNOther[cur]
+    if not other then return false end
+    if not _0xa299._0xHLWNMethodOn(other) then return false end
+    if not _0xa299._0xHLWNMethodFresh(other) then return false end
+
+    B.method = other
+
+    -- Clear the bookkeeping each branch keys off, or the method we are handing
+    -- to inherits the other one's timers and gives up immediately.
+    B.spawnStartTime = nil
+    B.currentPoint = nil
+    B.currentTargetNPC = nil
+    B.farmingNPCs = false
+    _0xa299._0xHLWNScanReset()
+
+    _0xa299._0x8545:Notify("Farm",
+        tostring(reason) .. " - switching to " .. other, 3, "info")
+    return true
+end
+
+-- Which method to begin on. Barbarit first when both are selected, as asked.
+function _0xa299._0xHLWNFirstMethod()
+    if _0xa299._0xHLWNMethodOn("Barbarit The Hallowed") then
+        return "Barbarit The Hallowed"
+    end
+    if _0xa299._0xHLWNMethodOn("PumpkinPoint") then
+        return "PumpkinPoint"
+    end
+    return _0xa299._0xb81e.method
+end
 
 ---------------------------------------------------------------------
 -- PUMPKIN POINT SCAN SWEEP
@@ -29845,6 +29937,15 @@ function _0xa299._0xc0db()
                     return
                 end
 
+                -- Still nothing, and the Corrupted Point method either is off or
+                -- has no mission to take. Hand over to Barbarit before giving
+                -- up on the server. Tried AFTER the Corrupted Point block
+                -- above on purpose: that one keeps Pumpkin Point alive, so it
+                -- is not "exhausted" while it can still spawn its own point.
+                if _0xa299._0xHLWNHandOver("No Pumpkin Points") then
+                    return
+                end
+
                 -- Sweep found nothing anywhere, so the server really is empty.
                 -- With hopping off, show the countdown to the next sweep.
                 if not _0xa299._0xb81e.serverHopIfNone then
@@ -29903,6 +30004,8 @@ function _0xa299._0xc0db()
             -- A point is visible, so the sweep did its job: rewind it so the
             -- next dry spell starts from spot 1.
             _0xa299._0xHLWNScanReset()
+            -- This method is producing, so clear any exhausted stamp on it.
+            _0xa299._0xHLWNMethodWorking()
             
             local targetPart = presentPoint:IsA("BasePart") and presentPoint or (presentPoint:IsA("Model") and (presentPoint.PrimaryPart or presentPoint:FindFirstChildWhichIsA("BasePart")))
             if not targetPart then return end
@@ -30169,7 +30272,14 @@ function _0xa299._0xc0db()
             -- Handle invalid boss (Barbarit The Rose spawned instead)
             if isInvalidBoss then
                 hrp.CFrame = _0xa299._0xdde4()
-                
+
+                -- Offer the work to Pumpkin Point before leaving the server:
+                -- the wrong boss is up, which is nothing to do with whether
+                -- there are points to farm. See _0xa299._0xHLWNHandOver.
+                if _0xa299._0xHLWNHandOver("Invalid Barbarit (The Rose)") then
+                    return
+                end
+
                 -- Server hop if enabled
                 if _0xa299._0xb81e.serverHopIfNone and not _0xa299._0xb81e.serverHopPending then
                     _0xa299._0xb81e.serverHopPending = true
@@ -30268,6 +30378,13 @@ function _0xa299._0xc0db()
                 
                 -- Check if 7 seconds have passed without boss spawning
                 if spawnElapsed >= 7 then
+                    -- No Barbarit here. Hand over to Pumpkin Point rather than
+                    -- hopping, and only hop once that has nothing either --
+                    -- this is the "if there is no more barbarit" case.
+                    if _0xa299._0xHLWNHandOver("No Barbarit after 7s") then
+                        return
+                    end
+
                     if _0xa299._0xb81e.serverHopIfNone and not _0xa299._0xb81e.serverHopPending then
                         -- Server hop
                         _0xa299._0xb81e.serverHopPending = true
@@ -30326,6 +30443,11 @@ function _0xa299._0xc0db()
             _0xa299._0xb81e.spawnStartTime = nil
             _0xa299._0xb81e.waitingAtSafespot = false
             _0xa299._0xb81e.safespotWaitEndTime = nil
+
+            -- A real boss is up, so this method is producing: clear any
+            -- exhausted stamp, or after one dry spell it would keep handing
+            -- straight over to Pumpkin Point for the next minute.
+            _0xa299._0xHLWNMethodWorking()
             
             -- Boss found, reset server hop pending
             _0xa299._0xb81e.serverHopPending = false
@@ -30419,6 +30541,8 @@ function _0xa299._0xefc6()
     -- switched off would leave the Heartbeat standing off for good next time.
     _0xa299._0xHLWNCP.busy = false
     _0xa299._0xHLWNCP.unavailableUntil = 0
+    -- Both methods start fresh next run.
+    _0xa299._0xb81e.methodExhausted = {}
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
     _0xa299._0xb81e.isRecoveringHP = false
@@ -30565,14 +30689,49 @@ function _0xa299._0xefc6()
     end
 end
 
-_0xa299._0xHLWN:AddDropdown("Farm Method", _0xa299._0x891f, _0xa299._0x891f[1], function(Value)
-    _0xa299._0xb81e.method = Value
-    _0xa299._0x8545:Notify("Farm", "Halloween method: " .. Value, 2, "info")
+-- Multi-select, and the text is "Farm Methods" rather than the old singular:
+-- Library.Options is keyed by element text, so reusing "Farm Method" would
+-- hand a saved plain string to a multi-dropdown.
+_0xa299._0xHLWN:AddMultiDropdown("Farm Methods", _0xa299._0x891f,
+    { _0xa299._0x891f[1] }, function(Value)
+    -- The library hands the selection back as a table. Accept BOTH shapes -
+    -- an array of picked strings, or a set keyed by them - the same way the
+    -- Avoid Killing dropdown does.
+    local set = {}
+    if type(Value) == "table" then
+        for k, v in pairs(Value) do
+            if type(v) == "string" then set[v] = true
+            elseif v == true and type(k) == "string" then set[k] = true end
+        end
+    end
+    _0xa299._0xHLWNMethods = set
+
+    -- Nothing picked leaves _0xHLWNMethodOn falling back to the current
+    -- method, so the farm keeps running rather than stalling.
+    if next(set) == nil then return end
+
+    -- Starting fresh: Barbarit first when both are on, and drop the exhausted
+    -- stamps so a reselect is not held off by an earlier dry spell.
+    _0xa299._0xb81e.methodExhausted = {}
+    if not set[_0xa299._0xb81e.method] then
+        _0xa299._0xb81e.method = _0xa299._0xHLWNFirstMethod()
+    end
+
+    local names = {}
+    for n in pairs(set) do table.insert(names, n) end
+    table.sort(names)
+    _0xa299._0x8545:Notify("Farm",
+        "Halloween methods: " .. table.concat(names, " + "), 2, "info")
 end)
 
 _0xa299._0xHLWN:AddToggle("Enable Halloween Farm", false, function(Value)
     _0xa299._0xb81e.enabled = Value
     if Value then
+        -- Begin on Barbarit when both methods are picked, from a clean slate so
+        -- a dry spell from a previous run does not hand straight over.
+        _0xa299._0xb81e.methodExhausted = {}
+        _0xa299._0xb81e.method = _0xa299._0xHLWNFirstMethod()
+
         task.spawn(function()
             -- Wait for config to fully load (similar to bossfarm)
             task.wait(0.5)
