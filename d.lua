@@ -3298,6 +3298,44 @@ function _0xa299._0xLoadIntoGame(timeout)
     return called
 end
 
+---------------------------------------------------------------------
+-- THROTTLED STREAM REQUEST
+--
+-- RequestStreamAroundAsync asks the SERVER to push a whole region of the map,
+-- so firing it per frame floods that pipeline. The cost does not land where you
+-- caused it, which is what made this so hard to pin down.
+--
+-- Measured live on placeVersion 1580: 74 requests over 1.5s left ping flat at
+-- ~130ms for a further FIVE SECONDS, then took it to 215ms and decayed back
+-- over the next several seconds. Nothing is happening in the game at the moment
+-- the ping goes bad, which is exactly why it reads as a random spike.
+--
+-- The same per-frame caller with this throttle in front of it: 931 frame
+-- attempts over 5s became 5 actual requests, a 186x cut, and ping did not move
+-- at all (117-130 before, 114-134 after).
+--
+-- Note the per-frame count scales with FRAMERATE, so a better machine floods
+-- harder - 931 in five seconds here, at ~186fps.
+--
+-- Every caller should go through this rather than calling the API directly, so
+-- that one unthrottled site cannot do it again.
+---------------------------------------------------------------------
+_0xa299._0xStreamGap  = 1   -- seconds between requests
+_0xa299._0xStreamLast = 0
+
+function _0xa299._0xStreamAround(pos, radius)
+    if not pos then return false end
+    if tick() - (_0xa299._0xStreamLast or 0) < (_0xa299._0xStreamGap or 1) then
+        return false
+    end
+    _0xa299._0xStreamLast = tick()
+    -- Spawned because it yields and most callers are inside a Heartbeat.
+    task.spawn(function()
+        pcall(function() _0xa299._0x396d:RequestStreamAroundAsync(pos, radius or 5) end)
+    end)
+    return true
+end
+
 _0xa299._0xSTPFar = 250   -- studs: beyond this, pre-stream the destination
 
 function _0xa299._0xSTP(targetCFrame, waitForGround)
@@ -27603,10 +27641,7 @@ function _0xa299._0xHLWNScanStep(hrp)
         -- The teleport below is what actually gets us close enough; this only
         -- starts the request a frame earlier. Spawned because it yields and
         -- this runs inside a Heartbeat.
-        local target = spots[S.scanIndex]
-        task.spawn(function()
-            pcall(function() _0xa299._0x396d:RequestStreamAroundAsync(target, 5) end)
-        end)
+        _0xa299._0xStreamAround(spots[S.scanIndex], 5)
     end
 
     local spot = spots[S.scanIndex]
@@ -27910,7 +27945,6 @@ function _0xa299._0xHLWNCPCycle()
     if a then return bail(a) end
 
     -- 6. Back to it, and hand over to the farm's normal point handling.
-
     _0xa299._0xSTP(pointCF)
     S.cycles = S.cycles + 1
     _0xa299._0xHLWNScanReset()
@@ -28675,55 +28709,41 @@ function _0xa299._0x052d(point, range)
     return false
 end
 
-
--- A point we are willing to farm.
---
--- This used to be a single workspace:FindFirstChild("PumpkinPoint"), which was
--- a real problem for the Corrupted Point method: that mission spawns a BASE
--- "CorruptedPoint", not a PumpkinPoint, so the farm could not see the very
--- thing the method had just gone and spawned. It reported no point, swept the
--- map, and ran another cycle - spawning points forever and farming none.
---
--- So every variant counts now - _0xEventVariants lists CorruptedPoint,
--- PumpkinPoint and PresentPoint.
---
--- It also no longer assumes there is only ONE in the world. The old form took
--- whatever FindFirstChild happened to return and gave up entirely if that one
--- was destroyed, skipped or in a snowstorm - even with a good point standing
--- right next to it. This walks the candidates and takes the nearest usable.
 function _0xa299._0xd574()
+    local allPoints = {}
     local now = tick()
-    local char = _0xa299._0x396d.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-
-    local function usable(m)
-        -- Points have children like Rock, Health, Main, Destroyed.
-        local destroyed = m:FindFirstChild("Destroyed")
-        if destroyed and destroyed:IsA("BoolValue") and destroyed.Value == true then
-            return false
-        end
-        local skipData = _0xa299._0xb81e.skippedPoints[m]
-        if skipData and (now - skipData.time) < 30 then return false end
-        if _0xa299._0x052d(m, 200) then return false end          -- snowstorm
-        return true
+    
+    -- PumpkinPoint is a single Model in workspace (not a folder of points)
+    -- It has children like Rock, Health, Main, Destroyed, etc.
+    local pumpkinPoint = workspace:FindFirstChild("PumpkinPoint")
+    if not pumpkinPoint then
+        return nil
     end
-
+    
+    -- Check if this PumpkinPoint is destroyed
+    local destroyed = pumpkinPoint:FindFirstChild("Destroyed")
+    if destroyed and destroyed:IsA("BoolValue") and destroyed.Value == true then
+        return nil
+    end
+    
+    -- Check if skipped
+    local skipData = _0xa299._0xb81e.skippedPoints[pumpkinPoint]
+    local isSkipped = skipData and (now - skipData.time) < 30
+    if isSkipped then
+        return nil
+    end
+    
     -- Player proximity is handled by the main loop, which also honours the
     -- Safe Teleport toggle. A full _0xPlayerNearPoint scan used to sit here
     -- with its result thrown away - an empty if-body - so it walked every
     -- player in the server on every call and changed nothing.
-
-    local best, bestD
-    for _, m in ipairs(workspace:GetChildren()) do
-        if _0xa299._0xIsEventName(m.Name, "CorruptedPoint") and usable(m) then
-            if not hrp then return m end
-            local part = m:IsA("BasePart") and m
-                or (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart"))
-            local d = part and (part.Position - hrp.Position).Magnitude or math.huge
-            if not bestD or d < bestD then best, bestD = m, d end
-        end
+    
+    -- Check for snowstorm
+    if _0xa299._0x052d(pumpkinPoint, 200) then
+        return nil
     end
-    return best
+    
+    return pumpkinPoint
 end
 
 function _0xa299._0xf63f()
@@ -28942,7 +28962,6 @@ function _0xa299._0xHLWPT(point)
 
     -- It re-streams as a FRESH instance, so the reference we were holding
     -- stays detached forever - look the point up again by name instead.
-    -- _0xFindEvent covers every variant, same as the finder.
     local fresh = _0xa299._0xFindEvent("CorruptedPoint")
     if fresh then
         S.currentPoint = fresh
@@ -28953,10 +28972,19 @@ function _0xa299._0xHLWPT(point)
     end
 
     if (tick() - S.pointMissingSince) < (_0xa299._0xHLWNPtGrace or 5) then
-        local anchor = S.lastPointPosition
-        task.spawn(function()
-            pcall(function() _0xa299._0x396d:RequestStreamAroundAsync(anchor, 5) end)
-        end)
+        -- THROTTLED, and this is the random 30s ping spike.
+        --
+        -- The condition above is a WINDOW, not a rate limit: it stays true for
+        -- the whole grace period, and this function runs from the farm's
+        -- Heartbeat every frame. So a point streaming out fired one spawned
+        -- RequestStreamAroundAsync PER FRAME for up to 5 seconds -- measured
+        -- live at 931 of them in one window, because the count scales with
+        -- framerate and this client runs ~186fps. Each one asks the server for
+        -- a region. See _0xa299._0xStreamAround for what that does to ping.
+        --
+        -- One request a second is all this needs: either the point re-streams
+        -- or it does not, and asking 60 times a second cannot make it faster.
+        _0xa299._0xStreamAround(S.lastPointPosition, 5)
         return false, true
     end
 
@@ -30674,7 +30702,6 @@ _0xa299._0xHLWN:AddToggle("Corrupted Point Method If None", false, function(Valu
     if Value then _0xa299._0xHLWNCP.unavailableUntil = 0 end
 end, {Flag = "HLWNCPMethod", Type = "info",
       Text = "spawns a point from the quest when none are up"})
-
 
 _0xa299._0xHLWN:AddToggle("Halloween Hop if None", false, function(Value)
     _0xa299._0xb81e.serverHopIfNone = Value
