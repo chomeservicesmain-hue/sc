@@ -24543,6 +24543,29 @@ function _0xa299._0xInCombat()
     return t ~= nil and t > 0
 end
 
+-- ReplicatedStorage.Settings[us], resolved ON DEMAND.
+--
+-- NEVER hold this in a local outside a loop. Anything that respawns us -- a
+-- menu round trip, a server hop, a force load-in -- has the server tear this
+-- folder down and build a fresh one, and an Instance handle stays TRUTHY after
+-- that while its children are gone. So the usual
+--     if userSettings and userSettings:FindFirstChild("CombatCount") then
+-- quietly stops matching and the loop that depends on it does nothing at all
+-- for the rest of the session, with no error anywhere to show for it. Same
+-- truthy-but-wrong trap as the notes on _0xCountItem and _0xActiveMission.
+--
+-- This is what stopped Infinite M1 on a point spawned by the Corrupted Point
+-- method: that method fires two menu round trips per cycle. It would have done
+-- the same after any respawn.
+--
+-- The Parent test is what tells a live folder from a detached handle.
+function _0xa299._0xMySettings()
+    local s = _0xa299._0xe08d:FindFirstChild("Settings")
+    local mine = s and s:FindFirstChild(_0xa299._0x396d.Name)
+    if mine and mine.Parent then return mine end
+    return nil
+end
+
 -- Ryo on hand (not banked). HUD first, _G.Data as the fallback.
 function _0xa299._0xRyoOnHand()
     local n
@@ -27421,6 +27444,7 @@ _0xa299._0xb81e = {
     isCollectingLoot = false,
     lootCollectionEndTime = 0,
     lastPointPosition = nil,
+    npcSweepPos = nil,        -- see _0xa299._0xHLWNSweepNPCs
     targetPosition = nil,
     currentTargetNPC = nil,
     farmingNPCs = false,
@@ -28499,6 +28523,103 @@ function _0xa299._0xb02e(position, range)
     return npcs
 end
 
+---------------------------------------------------------------------
+-- LEFTOVER NPC SWEEP
+--
+-- A point's Hallowed NPCs outlive the point itself. The farm cleared
+-- lastPointPosition the moment loot collection finished and went straight off
+-- hunting the next point, so anything still alive back there was abandoned --
+-- it only ever got picked up again if it happened to end up within 100 studs
+-- of the NEXT point.
+--
+-- So after loot the position is kept in npcSweepPos and this finishes what is
+-- left before moving on. Same engagement rules as the in-point NPC handling:
+-- lock the closest, grip it if it goes down, and give up on one that has not
+-- taken damage for 15s so a stuck NPC cannot park the farm here.
+--
+-- Returns true while it still has work, which is the caller's cue to return
+-- and NOT start hunting a new point or sweeping the map.
+--
+-- Only consulted on the no-point path: when a point IS up it takes priority,
+-- and that branch already clears NPCs within 100 studs of it anyway.
+---------------------------------------------------------------------
+_0xa299._0xHLWNSweepRange = 120   -- studs from the point we just cleared
+
+function _0xa299._0xHLWNSweepNPCs(hrp)
+    local S = _0xa299._0xb81e
+    local pos = S.npcSweepPos
+    if not pos then return false end
+
+    local function drop()
+        S.currentTargetNPC   = nil
+        S.currentNPCStartTime = nil
+        S.lastNPCHealth      = nil
+    end
+
+    -- Still on the one from last frame?
+    local cur = S.currentTargetNPC
+    if cur then
+        local model, hum, nhrp = cur.npc, cur.humanoid, cur.hrp
+        if model and model:IsDescendantOf(workspace)
+           and hum and nhrp and hum.Health > 0 then
+            local hp = math.floor(hum.Health)
+            if S.lastNPCHealth and hp >= S.lastNPCHealth then
+                if S.currentNPCStartTime
+                   and (tick() - S.currentNPCStartTime) > 15 then
+                    _0xa299._0x8545:Notify("Farm",
+                        "Leftover NPC not taking damage, skipping", 2, "info")
+                    drop()
+                    return true
+                end
+            elseif S.lastNPCHealth then
+                S.currentNPCStartTime = tick()
+            end
+            S.lastNPCHealth = hp
+
+            _0xa299._0xded8("farming_npc", model.Name,
+                hp .. "/" .. math.floor(hum.MaxHealth))
+            if _0xa299._0xHLWNTryGrip(model, hrp) then return true end
+
+            local off = _0xa299._0xHLWNNpcOffset(model)
+            _0xa299._0xVelSettle(hrp)
+            hrp.CFrame = CFrame.new(nhrp.Position + Vector3.new(0, off, 0), nhrp.Position)
+            return true
+        end
+        drop()
+    end
+
+    local left = _0xa299._0xb02e(pos, _0xa299._0xHLWNSweepRange or 120)
+    if #left == 0 then
+        S.npcSweepPos = nil
+        if S.farmingNPCs then
+            S.farmingNPCs = false
+            _0xa299._0x8545:Notify("Farm",
+                "Leftover NPCs cleared, moving to next point", 2, "check")
+        end
+        return false
+    end
+
+    if not S.farmingNPCs then
+        S.farmingNPCs = true
+        _0xa299._0x8545:Notify("Farm",
+            tostring(#left) .. " NPC(s) left at the point, clearing", 2, "info")
+    end
+
+    local t = left[1]
+    S.currentTargetNPC   = t
+    S.currentNPCStartTime = tick()
+    S.lastNPCHealth      = nil
+
+    _0xa299._0xded8("farming_npc", t.npc.Name,
+        math.floor(t.humanoid.Health) .. "/" .. math.floor(t.humanoid.MaxHealth))
+    if _0xa299._0xHLWNTryGrip(t.npc, hrp) then return true end
+
+    local off = _0xa299._0xHLWNNpcOffset(t.npc)
+    _0xa299._0xVelSettle(hrp)
+    hrp.CFrame = CFrame.new(t.hrp.Position + Vector3.new(0, off, 0), t.hrp.Position)
+    return true
+end
+
 function _0xa299._0xfd0a(point)
     local healthValue = point:FindFirstChild("Health")
     if healthValue and (healthValue:IsA("IntValue") or healthValue:IsA("NumberValue")) then
@@ -28579,7 +28700,6 @@ function _0xa299._0xc0db()
     _0xa299._0xa6f6.noFallDamage = true
     
     local DataEvent = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
-    local user = _0xa299._0x396d.Name
     
     -- FORCE LOAD IN
     --
@@ -28741,7 +28861,6 @@ function _0xa299._0xc0db()
     -- Infinite M1 connection
     if _0xa299._0xb81e.infiniteM1 and heavyWeapon then
         _0xa299._0xb81e.infiniteM1Connection = task.spawn(function()
-            local userSettings = _0xa299._0xe08d:FindFirstChild("Settings") and _0xa299._0xe08d.Settings:FindFirstChild(user)
             
             while _0xa299._0xb81e.enabled do
                 task.wait()
@@ -28750,6 +28869,8 @@ function _0xa299._0xc0db()
                     continue
                 end
                 
+                -- Re-resolved every pass: see _0xa299._0xMySettings.
+                local userSettings = _0xa299._0xMySettings()
                 if userSettings and userSettings:FindFirstChild("CombatCount") then
                     -- Unequip if not Fist or Tai
                     if userSettings:FindFirstChild("CurrentWeapon") then
@@ -29227,9 +29348,29 @@ function _0xa299._0xc0db()
             else
                 -- Loot collection done
                 _0xa299._0xb81e.isCollectingLoot = false
+
+                -- Double-check the point for NPCs still alive before moving
+                -- on. They outlive the point, and wiping lastPointPosition
+                -- here is what used to abandon them. Read BEFORE the clear
+                -- below, since that is the only record of where we were.
+                -- See _0xa299._0xHLWNSweepNPCs.
+                local clearedAt = _0xa299._0xb81e.lastPointPosition
+                local leftover = clearedAt
+                    and _0xa299._0xb02e(clearedAt, _0xa299._0xHLWNSweepRange or 120)
+                    or {}
+
                 _0xa299._0xb81e.lastPointPosition = nil
                 table.clear(_0xa299._0xb81e.lootPickupTable)
-                _0xa299._0x8545:Notify("Farm", "Loot collected, moving to next point", 2, "check")
+
+                if #leftover > 0 then
+                    _0xa299._0xb81e.npcSweepPos = clearedAt
+                    _0xa299._0x8545:Notify("Farm",
+                        tostring(#leftover) .. " NPC(s) still up, clearing those first",
+                        2, "info")
+                else
+                    _0xa299._0xb81e.npcSweepPos = nil
+                    _0xa299._0x8545:Notify("Farm", "Loot collected, moving to next point", 2, "check")
+                end
 
                 -- Auto Sell Gems after loot collection
                 if _0xa299._0xb81e.autoSellGems then
@@ -29320,6 +29461,18 @@ function _0xa299._0xc0db()
             
             local presentPoint = _0xa299._0xd574()
             if not presentPoint then
+                -- Finish off anything still alive at the point we just cleared
+                -- before treating this as "no points anywhere".
+                --
+                -- This HAS to sit above everything below it. The search path
+                -- drops currentTargetNPC, sets isSearching (which the auto-M1
+                -- handler skips on), pauses the farm animation and unequips the
+                -- weapon -- so a sweep placed after it would re-lock its target
+                -- every frame and hit for nothing.
+                if _0xa299._0xHLWNSweepNPCs(hrp) then
+                    return
+                end
+
                 _0xa299._0xb81e.farmingNPCs = false
                 _0xa299._0xb81e.currentTargetNPC = nil
                 _0xa299._0xb81e.isSearching = true
@@ -29947,6 +30100,7 @@ function _0xa299._0xefc6()
     _0xa299._0xb81e.isRecoveringHP = false
     _0xa299._0xb81e.isCollectingLoot = false
     _0xa299._0xb81e.lastPointPosition = nil
+    _0xa299._0xb81e.npcSweepPos = nil
     _0xa299._0xb81e.pointMissingSince = nil
     _0xa299._0xb81e.barbDodgeUntil = 0
     _0xa299._0xb81e.serverHopPending = false
@@ -34135,7 +34289,6 @@ function _0xa299._0xLavaFarmStart()
     if _0xa299._0xLAVAF.infiniteM1 and _0xa299._0xLAVAF.heavyWeapon then
         local DataEvent = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
         _0xa299._0xLAVAF.infiniteM1Connection = task.spawn(function()
-            local userSettings = _0xa299._0xe08d:FindFirstChild("Settings") and _0xa299._0xe08d.Settings:FindFirstChild(_0xa299._0x396d.Name)
             
             while _0xa299._0xLAVAF.farming do
                 task.wait()
@@ -34144,6 +34297,8 @@ function _0xa299._0xLavaFarmStart()
                     continue
                 end
                 
+                -- Re-resolved every pass: see _0xa299._0xMySettings.
+                local userSettings = _0xa299._0xMySettings()
                 if userSettings and userSettings:FindFirstChild("CombatCount") then
                     if userSettings:FindFirstChild("CurrentWeapon") then
                         local currentWeaponValue = userSettings.CurrentWeapon.Value
@@ -38149,7 +38304,6 @@ function _0xa299._0xa94c()
     if _0xa299._0x1915.infiniteM1 and heavyWeapon then
         local DataEvent = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
         _0xa299._0x1915.infiniteM1Connection = task.spawn(function()
-            local userSettings = _0xa299._0xe08d:FindFirstChild("Settings") and _0xa299._0xe08d.Settings:FindFirstChild(_0xa299._0x396d.Name)
             
             while _0xa299._0x1915.farming do
                 task.wait()
@@ -38159,6 +38313,8 @@ function _0xa299._0xa94c()
                     continue
                 end
                 
+                -- Re-resolved every pass: see _0xa299._0xMySettings.
+                local userSettings = _0xa299._0xMySettings()
                 if userSettings and userSettings:FindFirstChild("CombatCount") then
                     -- Unequip if not Fist or Tai
                     if userSettings:FindFirstChild("CurrentWeapon") then
@@ -39992,12 +40148,13 @@ function _0xa299._0xa94c()
                     if _0xa299._0x1915.infiniteM1 and _0xa299._0x1915.heavyWeapon and not _0xa299._0x1915.infiniteM1Connection then
                         local DataEvent = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
                         _0xa299._0x1915.infiniteM1Connection = task.spawn(function()
-                            local userSettings = _0xa299._0xe08d:FindFirstChild("Settings") and _0xa299._0xe08d.Settings:FindFirstChild(_0xa299._0x396d.Name)
                             while _0xa299._0x1915.farming do
                                 task.wait()
                                 if _0xa299._0x1915.isEatingRamen or _0xa299._0x1915.playerNearby or _0xa299._0x1915.isGripped or (_0xa299._0x6378 and _0xa299._0x2008) then
                                     continue
                                 end
+                                -- Re-resolved every pass: see _0xa299._0xMySettings.
+                                local userSettings = _0xa299._0xMySettings()
                                 if userSettings and userSettings:FindFirstChild("CombatCount") then
                                     if userSettings:FindFirstChild("CurrentWeapon") then
                                         local currentWeaponValue = userSettings.CurrentWeapon.Value
