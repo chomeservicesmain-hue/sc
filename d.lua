@@ -24526,10 +24526,22 @@ end
 -- and we write the label back at the end to keep the next call honest.
 ---------------------------------------------------------------------
 _0xa299._0xBANKRYO = {
-    chunk     = 1000,   -- deposit this much at a time, and the trigger level
-    maxPerRun = 20,     -- hard stop, so a strange reply cannot spin in here
-    busy      = false,
+    busy   = false,
+    lastAt = 0,
+    -- Floor between deposits. Ryo ticks up on every kill, so without this a
+    -- farm would fire depositRyo every couple of seconds for hours - well past
+    -- anything a person does by hand, and the call rate itself becomes the
+    -- tell. 3s still banks it as soon as you get it from where you are sitting.
+    minGap = 3,
 }
+
+-- Are we in combat? ReplicatedStorage.CombatTags holds a NumberValue per tag
+-- that counts the timer down, so any positive one means we are tagged.
+-- _0xGetCombatTimer returns nil when there is no tag folder at all.
+function _0xa299._0xInCombat()
+    local t = _0xa299._0xGetCombatTimer(_0xa299._0x396d)
+    return t ~= nil and t > 0
+end
 
 -- Ryo on hand (not banked). HUD first, _G.Data as the fallback.
 function _0xa299._0xRyoOnHand()
@@ -24543,49 +24555,53 @@ function _0xa299._0xRyoOnHand()
     return (data and tonumber(data.Ryo)) or 0
 end
 
+-- Safe to call from a farm's Heartbeat: every gate here is cheap and nothing
+-- yields, the deposit itself is spawned. The gates are ordered cheapest-first
+-- so the per-frame cost is normally a single tick() comparison.
 function _0xa299._0xBankRyo(enabled, label)
     local S = _0xa299._0xBANKRYO
     if not enabled or S.busy then return end
+    if tick() - (S.lastAt or 0) < (S.minGap or 3) then return end
+
+    -- Out of combat only. Banking mid-fight is the one time it is conspicuous,
+    -- and the server may refuse it outright while tagged.
+    if _0xa299._0xInCombat() then return end
 
     local have = _0xa299._0xRyoOnHand()
-    if have < S.chunk then return end
+    if have <= 0 then return end
 
     S.busy = true
-    local banked, runs = 0, 0
+    S.lastAt = tick()
 
-    while have >= S.chunk and runs < S.maxPerRun do
-        runs = runs + 1
-
+    task.spawn(function()
+        -- Deposits the whole balance, not a fixed 1000: the game sends whatever
+        -- was typed into the Bank TextBox, so any amount is a legitimate shape.
+        --
         -- Kept as `df:InvokeServer(...)` on one line rather than chained off
         -- WaitForChild: tools/audit_remote_args.py harvests `<name>:InvokeServer(`,
         -- so a chain broken across lines makes this remote invisible to the
         -- arity check that exists to stop us firing a banned signature.
         local ok, pdata = pcall(function()
             local df = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
-            return df:InvokeServer("depositRyo", tostring(S.chunk))
+            return df:InvokeServer("depositRyo", tostring(have))
         end)
-        if not ok then break end
 
-        local left = pdata and tonumber(pdata.Ryo)
-        -- No usable reply, or the balance did not go down: the server refused.
-        -- Repeating a rejected call is pointless and loud, so stop.
-        if not left or left >= have then break end
+        local left = ok and pdata and tonumber(pdata.Ryo) or nil
+        -- The reply carries the new on-hand balance, which is what the game
+        -- repaints its HUD from. Re-reading the label instead would not work:
+        -- the game only repaints it inside ITS deposit handler, which our call
+        -- does not go through, so it stays stale and the next pass would
+        -- deposit against a number that never moved.
+        if left and left < have then
+            pcall(function()
+                _0xa299._0x396d.PlayerGui.ClientGui.Mainframe.Ryo.Amount.Text = tostring(left)
+            end)
+            _0xa299._0x8545:Notify(label or "Farm",
+                "Banked " .. tostring(have - left) .. " ryo", 2, "check")
+        end
 
-        -- Credit what actually moved rather than assuming the full chunk.
-        banked = banked + (have - left)
-        have = left
-        if have >= S.chunk then task.wait(0.35) end
-    end
-
-    S.busy = false
-
-    if banked > 0 then
-        pcall(function()
-            _0xa299._0x396d.PlayerGui.ClientGui.Mainframe.Ryo.Amount.Text = tostring(have)
-        end)
-        _0xa299._0x8545:Notify(label or "Farm",
-            "Banked " .. tostring(banked) .. " ryo", 3, "check")
-    end
+        S.busy = false
+    end)
 end
 
 function _0xa299._0xMasteryOff()
@@ -27476,6 +27492,23 @@ _0xa299._0xHLWNScanSpots = {
     Vector3.new(1342.8543701171875, -50.021263122558594, -113.12157440185547),
     Vector3.new(3148.677001953125, 231.91574096679688, -756.167236328125),
 }
+-- Seconds between auto-M1s. Reads the game's own MeleeCooldown, which is the
+-- same source the Boss Farm paces off, so the cadence matches a real client
+-- rather than a number we picked. The floor is the Boss Farm's proven 0.15 for
+-- when that value cannot be read.
+_0xa299._0xHLWNM1Floor = 0.15
+function _0xa299._0xHLWNM1Gap()
+    local v
+    pcall(function()
+        local s = _0xa299._0xe08d:FindFirstChild("Settings")
+        local mine = s and s:FindFirstChild(_0xa299._0x396d.Name)
+        local mc = mine and mine:FindFirstChild("MeleeCooldown")
+        v = mc and tonumber(mc.Value)
+    end)
+    if v and v > 0 then return v end
+    return _0xa299._0xHLWNM1Floor
+end
+
 _0xa299._0xHLWNScanDwell = 5    -- seconds to hold at each spot
 _0xa299._0xHLWNScanRetry = 60   -- seconds before re-sweeping when hopping is off
 
@@ -28794,9 +28827,28 @@ function _0xa299._0xc0db()
     end
     
     -- Auto M1 connection
-    _0xa299._0xb81e.m1Connection = _0xa299._0x64b8.Heartbeat:Connect(function()
+    --
+    -- RATE GATED, and that gate is the fix for the random multi-thousand ping
+    -- spike during this farm. This fired CheckMeleeHit on EVERY Heartbeat -
+    -- ~60 FireServer calls a second, against the Boss Farm's ~6.7
+    -- (task.wait(0.15)) and the mastery farm's ~10 (dt accumulated to 0.1).
+    -- Sustained, that buries the client's outbound remote queue: calls back up
+    -- faster than they drain, and reported ping climbs into the tens of
+    -- thousands and stays there for as long as the farm runs. It was the only
+    -- unthrottled M1 in the script, which is why only this farm did it.
+    --
+    -- It is also not survivable as a fingerprint on its own terms: no melee
+    -- weapon in the game swings 60 times a second, and the Boss Farm already
+    -- paces itself off the game's own MeleeCooldown. Same source here.
+    local m1Accum = 0
+    _0xa299._0xb81e.m1Connection = _0xa299._0x64b8.Heartbeat:Connect(function(dt)
         if not _0xa299._0xb81e.enabled or not _0xa299._0xb81e.autoM1 then return end
         if _0xa299._0xb81e.hiding or _0xa299._0xb81e.playerHiding or _0xa299._0xb81e.isSearching then return end
+
+        m1Accum = m1Accum + dt
+        if m1Accum < _0xa299._0xHLWNM1Gap() then return end
+        m1Accum = 0
+
         pcall(function()
             local args = {"CheckMeleeHit", nil, "NormalAttack", false, _0xa299._0xTags.CheckMeleeHit}
             DataEvent:FireServer(unpack(args, 1, 5))
@@ -28969,6 +29021,12 @@ function _0xa299._0xc0db()
         -- a marker and back through the menu, and this loop re-pins to the
         -- safespot every frame.
         if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then return end
+
+        -- Bank ryo as soon as there is some and we are out of combat. Driven
+        -- from here rather than from the post-loot block so it does not wait
+        -- for a whole point to finish; the gates inside are cheap and it
+        -- spawns its own thread for the deposit.
+        _0xa299._0xBankRyo(_0xa299._0xb81e.autoBankRyo, "Farm")
         
         local char = _0xa299._0x396d.Character
         if not char then return end
@@ -29172,15 +29230,6 @@ function _0xa299._0xc0db()
                 _0xa299._0xb81e.lastPointPosition = nil
                 table.clear(_0xa299._0xb81e.lootPickupTable)
                 _0xa299._0x8545:Notify("Farm", "Loot collected, moving to next point", 2, "check")
-
-                -- Auto Bank Ryo. Spawned: the deposit is an InvokeServer and
-                -- would otherwise hold the farm loop until the server answers.
-                -- Its own busy latch stops these overlapping.
-                if _0xa299._0xb81e.autoBankRyo then
-                    task.spawn(function()
-                        _0xa299._0xBankRyo(_0xa299._0xb81e.autoBankRyo, "Farm")
-                    end)
-                end
 
                 -- Auto Sell Gems after loot collection
                 if _0xa299._0xb81e.autoSellGems then
@@ -30164,7 +30213,7 @@ end)
 _0xa299._0xHLWN:AddToggle("Halloween Auto Bank Ryo", false, function(Value)
     _0xa299._0xb81e.autoBankRyo = Value
 end, {Flag = "HLWNAutoBankRyo", Type = "info",
-      Text = "banks your ryo in 1000s while farming"})
+      Text = "banks your ryo when you get it, out of combat"})
 
 _0xa299._0xHLWN:AddDivider()
 
@@ -38306,6 +38355,12 @@ function _0xa299._0xa94c()
     _0xa299._0x1915.connection = _0xa299._0x64b8.Heartbeat:Connect(function()
         if not _0xa299._0x1915.farming then return end
 
+        -- Bank ryo as soon as there is some and we are out of combat. Driven
+        -- from here rather than from the post-loot block so it does not wait
+        -- for a whole boss to finish; the gates inside are cheap and it spawns
+        -- its own thread for the deposit.
+        _0xa299._0xBankRyo(_0xa299._0x1915.autoBankRyo, "Farm")
+
         local char = _0xa299._0x396d.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         -- CHECK: Handle not loaded in (for server hops)
@@ -39392,15 +39447,6 @@ function _0xa299._0xa94c()
                         lootdropwait:Disconnect()
                     end
                     
-                    -- Auto Bank Ryo. Spawned: the deposit is an InvokeServer
-                    -- and would otherwise hold the farm loop until the server
-                    -- answers. Its own busy latch stops these overlapping.
-                    if _0xa299._0x1915.autoBankRyo then
-                        task.spawn(function()
-                            _0xa299._0xBankRyo(_0xa299._0x1915.autoBankRyo, "Farm")
-                        end)
-                    end
-
                     -- Auto Sell Gems after loot collection
                     local gemSellDone = not _0xa299._0x1915.autoSellGems
                     local trinketSellDone = not _0xa299._0x1915.autoSellTrinkets
@@ -40758,7 +40804,7 @@ end)
 _0xa299._0xf02e:AddToggle("Auto Bank Ryo", false, function(Value)
     _0xa299._0x1915.autoBankRyo = Value
 end, {Flag = "AutoBankRyo", Type = "info",
-      Text = "banks your ryo in 1000s while farming"})
+      Text = "banks your ryo when you get it, out of combat"})
 
 _0xa299._0xf02e:AddToggle("Auto Infuse Weapons", false, function(Value)
     _0xa299._0x1915.autoInfuseWeapons = Value
