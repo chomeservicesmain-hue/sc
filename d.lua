@@ -27596,12 +27596,38 @@ function _0xa299._0xHLWNHandOver(reason)
 
     B.method = other
 
+    -- UNDO THE SEARCH STATE. This is the whole of "it sits above Barbarit
+    -- holding the offset and does nothing else".
+    --
+    -- Pumpkin Point's no-point path sets isSearching, pauses the farm animation
+    -- and unequips the weapon - and isSearching is read by THREE separate
+    -- loops, each of which skips while it is set: auto-M1, the weapon re-equip,
+    -- and the animation keep-alive. Nothing in the Barbarit branch ever cleared
+    -- it (it is only cleared when Pumpkin Point FINDS a point, or on teardown),
+    -- so after a handover the farm flew to the boss, held its offset, and
+    -- neither hit it nor re-equipped nor animated, for as long as it stayed.
+    --
+    -- Clearing the flag is enough for the weapon and the animation: both of
+    -- those loops re-check within 0.5s and heal themselves. The animation is
+    -- also kicked here so the resume is immediate rather than up to half a
+    -- second late.
+    B.isSearching = false
+    B.animTrack = _0xa299._0xHLWNResumeAnim()
+
     -- Clear the bookkeeping each branch keys off, or the method we are handing
-    -- to inherits the other one's timers and gives up immediately.
+    -- to inherits the other one's half-finished state and timers. Both sets go,
+    -- in both directions: a handover means "start this method fresh".
     B.spawnStartTime = nil
     B.currentPoint = nil
     B.currentTargetNPC = nil
     B.farmingNPCs = false
+    B.npcSweepPos = nil
+    B.isCollectingLoot = false
+    B.lastPointPosition = nil
+    B.waitingAtSafespot = false
+    B.safespotWaitEndTime = nil
+    B.bossLootCollecting = false
+    B.bossGripped = false
     _0xa299._0xHLWNScanReset()
 
     _0xa299._0x8545:Notify("Farm",
@@ -29624,7 +29650,24 @@ function _0xa299._0xc0db()
         end
         
         -- Handle Player nearby - skip current point and try to find another
-        if playerNearby then
+        --
+        -- POINT METHOD ONLY, and that guard is the fix for the Barbarit farm
+        -- spamming its hide notification and resetting the flag.
+        --
+        -- This block is point-centric: `playerNearby` above is measured from
+        -- _0xb81e.targetPosition, which is a POINT field and is nil on the
+        -- Barbarit method, so it is always false there. The Barbarit branch has
+        -- its own player check further down, measured from the Barbarit SPAWN.
+        --
+        -- With both live on the Barbarit method they fought every single frame:
+        -- this one saw no player, cleared playerHiding and announced "Player
+        -- left", then the Barbarit one saw the player, set playerHiding again,
+        -- announced "Player nearby" and paused the animation. Two
+        -- notifications a frame, with the animation and weapon flapping in
+        -- between -- which is the flag "resetting".
+        if _0xa299._0xb81e.method ~= "PumpkinPoint" then
+            -- Another method owns the player-nearby decision; leave it alone.
+        elseif playerNearby then
             -- Skip current point
             if _0xa299._0xb81e.currentPoint then
                 _0xa299._0xb81e.skippedPoints[_0xa299._0xb81e.currentPoint] = {time = tick()}
