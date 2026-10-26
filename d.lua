@@ -27533,6 +27533,41 @@ function _0xa299._0xHLWNM1Gap()
     return _0xa299._0xHLWNM1Floor
 end
 
+---------------------------------------------------------------------
+-- COMING BACK FROM A HIDE (Halloween)
+--
+-- Resume the farm animation ONLY when nothing still wants us dark.
+--
+-- The reasons to hide are independent - a chakra sensor (hiding), a player in
+-- range (playerHiding), and HP recovery (isRecoveringHP) - and every one of
+-- them used to resume the animation the moment ITS OWN reason cleared, without
+-- looking at the others. So a player wandering out of range while a sensor was
+-- still watching put the farming animation straight back on IN FRONT OF THE
+-- SENSOR: the chakra block that would have re-paused it runs later in the same
+-- frame and is gated on `if not hiding`, which was already true by then, so
+-- nothing ever re-paused it. It went wrong in every direction - the sensor
+-- leaving while a player stayed, HP restoring while either was true.
+--
+-- The animation keep-alive loop already tested all three. These call sites did
+-- not, which is the whole bug.
+--
+-- Returns the live track, or the existing one untouched when we must stay dark.
+---------------------------------------------------------------------
+function _0xa299._0xHLWNResumeAnim()
+    local S = _0xa299._0xb81e
+    if S.hiding or S.playerHiding or S.isRecoveringHP then
+        return S.animTrack
+    end
+    return _0xa299._0xFarmAnimRefresh()
+end
+
+-- True while something still wants us hidden, so a "back to farming" message
+-- does not claim something that is not happening.
+function _0xa299._0xHLWNStillDark()
+    local S = _0xa299._0xb81e
+    return (S.hiding or S.playerHiding or S.isRecoveringHP) and true or false
+end
+
 _0xa299._0xHLWNScanDwell = 5    -- seconds to hold at each spot
 _0xa299._0xHLWNScanRetry = 60   -- seconds before re-sweeping when hopping is off
 
@@ -27633,6 +27668,7 @@ _0xa299._0xHLWNCP = {
     enabled          = false,
     busy             = false,   -- a cycle is live; the Heartbeat must stand off
     unavailableUntil = 0,       -- board was not offering it; recheck after this
+    abortRequested   = false,  -- raised by the Heartbeat while a cycle runs
     cycles           = 0,
 }
 
@@ -27664,10 +27700,37 @@ function _0xa299._0xHLWNCPWaitChar(timeout)
     return _0xa299._0xHLWNCPHrp() ~= nil
 end
 
+---------------------------------------------------------------------
+-- SECURITY FOR THE CYCLE
+--
+-- This needs its own checks, and more than anywhere else in the farm, because
+-- _0xHLWNCP.busy makes the Heartbeat stand off for the WHOLE cycle. For the
+-- 30-60s this runs, the farm's chakra-sense hide, player-nearby skip and HP
+-- recovery are all suspended -- and the cycle walks us to a MISSION BOARD,
+-- which sits in a village: the most watched ground on the map. Left as it was,
+-- the method was a hole in the protection rather than merely unprotected.
+--
+-- Returns a reason string when the cycle must stop, or nil to carry on.
+-- Chakra sense is tested the way the boss farm tests it, `_0x6378 and _0x2008`,
+-- so a stale observed flag with the notifier off cannot pin this.
+---------------------------------------------------------------------
+function _0xa299._0xHLWNCPAbort()
+    local B = _0xa299._0xb81e
+    if _0xa299._0xHLWNCP.abortRequested then return "chakra sense" end
+    if not B.enabled then return "farm stopped" end
+    if _0xa299._0x6378 and _0xa299._0x2008 then return "chakra sense" end
+    if B.hiding then return "chakra sense" end
+    if B.playerHiding then return "player nearby" end
+    if B.isRecoveringHP then return "low HP" end
+    if B.serverHopPending then return "server hop" end
+    return nil
+end
+
 function _0xa299._0xHLWNCPCycle()
     local S = _0xa299._0xHLWNCP
     if S.busy then return false end
     S.busy = true
+    S.abortRequested = false
 
     local function stop(msg, boardEmpty)
         if boardEmpty then
@@ -27677,7 +27740,36 @@ function _0xa299._0xHLWNCPCycle()
             _0xa299._0x8545:Notify("Farm", "Corrupted Point method: " .. msg, 3, "warning")
         end
         S.busy = false
+        S.abortRequested = false
         return false
+    end
+
+    -- Abandon the cycle for anything the farm's own safety would act on.
+    -- Parks at the safespot and drops busy IMMEDIATELY, because the Heartbeat's
+    -- hide / HP / hop handling is what should run now and it cannot while busy
+    -- is set. Short retry hold, not the 90s board hold: nothing is wrong with
+    -- the board, we just need to be elsewhere for a bit.
+    local function bail(reason)
+        pcall(function()
+            local h = _0xa299._0xHLWNCPHrp()
+            if h then
+                _0xa299._0xVelSettle(h)
+                h.CFrame = _0xa299._0xdde4()
+            end
+        end)
+        S.busy = false
+        S.abortRequested = false
+        S.unavailableUntil = tick() + 15
+        if reason ~= "farm stopped" then
+            _0xa299._0x8545:Notify("Farm",
+                "Corrupted Point method paused: " .. reason, 3, "warning")
+        end
+        return false
+    end
+
+    -- Checked at every step boundary below, i.e. after everything that yields.
+    local function guard()
+        return _0xa299._0xHLWNCPAbort()
     end
 
     local function menuAndBack()
@@ -27709,13 +27801,19 @@ function _0xa299._0xHLWNCPCycle()
         return true
     end
 
+    -- Do not even start one while we should be hidden. The Heartbeat normally
+    -- catches this, but it has already stood off by the time we are here.
+    local a = guard()
+    if a then return bail(a) end
+
     -- 1. Shed an ongoing mission, and ONLY then. With no mission in progress
     --    the menu trip would be pointless downtime.
     if _0xa299._0xActiveMission() then
         local ok, why = menuAndBack()
         if not ok then return stop(why) end
     end
-    if not _0xa299._0xb81e.enabled then return stop(nil) end
+    a = guard()
+    if a then return bail(a) end
 
     -- 2. Take it off our own village's board.
     local team = _0xa299._0x396d.Team and _0xa299._0x396d.Team.Name or nil
@@ -27724,8 +27822,23 @@ function _0xa299._0xHLWNCPCycle()
     local board, boardCF = _0xa299._0xMissionBoard(team)
     if not (board and boardCF) then return stop("mission board did not load") end
 
+    -- Players at the board, before teleporting into them. Gated on Safe
+    -- Teleport being ON, since the range is that feature's setting -- the same
+    -- rule the Corrupted Point quest uses. It bails rather than waiting the
+    -- quest's 30s: the farm has other things it could be doing, and this
+    -- retries on its own.
+    if _0xa299._0x220a and _0xa299._0x220a.enabled then
+        local near = _0xa299._0xa382(boardCF.Position, _0xa299._0x220a.detectionRange or 100)
+        if near and #near > 0 then
+            return bail("players at the mission board")
+        end
+    end
+
     _0xa299._0xSTP(boardCF * CFrame.new(0, 0, 3))
     task.wait(0.5)
+
+    a = guard()
+    if a then return bail(a) end
 
     local took, why = _0xa299._0xTakeMission(board, _0xa299._0xHLWNCPName)
     if not took then
@@ -27739,15 +27852,29 @@ function _0xa299._0xHLWNCPCycle()
     -- 3. Arriving at the marker is what spawns the point.
     local markerCF = _0xa299._0xMissionMarker()
     if not markerCF then return stop("no mission marker appeared") end
+
+    a = guard()
+    if a then return bail(a) end
+
     _0xa299._0xSTP(markerCF)
     task.wait(1.5)
+
+    a = guard()
+    if a then return bail(a) end
 
     -- 4. Remember it. Matched on every seasonal variant, with the "Corrupted"
     --    substring as a backstop for a reskin we have not catalogued -- the
     --    same pair of tests the Corrupted Point quest uses.
     local pointCF
     local findDeadline = tick() + 8
+    local findAbort
     repeat
+        -- Checked inside the loop, not only after it: this is the longest wait
+        -- in the cycle, and a sensor arriving during it would otherwise go
+        -- unanswered for up to 8s.
+        findAbort = guard()
+        if findAbort then break end
+
         local me = _0xa299._0xHLWNCPHrp()
         local myPos = me and me.Position
         for _, obj in ipairs(workspace:GetChildren()) do
@@ -27765,12 +27892,22 @@ function _0xa299._0xHLWNCPCycle()
         if not pointCF then task.wait(0.25) end
     until pointCF or tick() > findDeadline
 
+    if findAbort then return bail(findAbort) end
     if not pointCF then return stop("point did not spawn at the marker") end
 
+    a = guard()
+    if a then return bail(a) end
+
     -- 5. Menu again, WITHOUT handing the mission in. The point stays.
+    --
+    -- Past this line a bail still has to go through the menu, or we would be
+    -- left mid-mission AND out of position. The point is already remembered,
+    -- so the next cycle picks up from step 1 and sheds the mission there.
     local ok2, why2 = menuAndBack()
     if not ok2 then return stop(why2) end
-    if not _0xa299._0xb81e.enabled then return stop(nil) end
+
+    a = guard()
+    if a then return bail(a) end
 
     -- 6. Back to it, and hand over to the farm's normal point handling.
     _0xa299._0xSTP(pointCF)
@@ -27779,6 +27916,7 @@ function _0xa299._0xHLWNCPCycle()
     _0xa299._0x8545:Notify("Farm",
         "Spawned a Corrupted Point (cycle " .. tostring(S.cycles) .. ")", 3, "check")
     S.busy = false
+    S.abortRequested = false
     return true
 end
 
@@ -28047,12 +28185,21 @@ end
 --     only while the Treat Basket is the selected item (client 12923:
 --     `if v.Selected == "Treat Basket"`). Hence selecting it first.
 --   * The option fires DataFunction:InvokeServer("trickOrTreat", dialogPart)
---     (client 7489). dialogPart is the NPC's HumanoidRootPart, picked by
---     GameManager:findNearbyNPC - which searches a box only about 16 x 12 x 14
---     studs in FRONT of the character, so we have to stand on the NPC.
+--     (client 7489). dialogPart is the NPC's HumanoidRootPart.
+--   * NO TELEPORT IS NEEDED. dialogPart is picked by GameManager:findNearbyNPC,
+--     which searches a box about 16 x 12 x 14 studs in FRONT of the character -
+--     but that is the CLIENT deciding which NPC to open dialogue with
+--     (GameManager 7048), not a check on the call. The remote just takes the
+--     part, so any NPC that is STREAMED IN can be asked from where we stand.
+--     This used to drive the character onto each NPC, which is what made it
+--     fight the farm heartbeat for the character; not moving at all removes
+--     that whole class of problem. _0xTBSK.needsProximity is the fallback if a
+--     server ever does validate range - it is learned once, from a refusal.
 --   * The return is truthy/falsy, not a string: the client shows its
 --     Option1.Response "Treat!" on success and its Failed.Response "Trick!"
---     otherwise.
+--     otherwise. Note that falsy covers BOTH a genuine trick AND a refused
+--     call, so the return alone cannot tell them apart - see the NPCS check in
+--     the run loop, which can.
 --
 -- THE BASKET CARRIES ITS OWN STATE, in the inventory entry's Data:
 --     Data = { Candies = 0, NPCS = { "The Banker", "Hyuga Elder" } }
@@ -28071,26 +28218,32 @@ end
 _0xa299._0xTBSK = {
     enabled = false,
     connection = nil,
-    busy = false,        -- farm heartbeat yields while this is set
+    -- Farm heartbeat yields while this is set. Now ONLY set on the proximity
+    -- fallback, the one path that still moves the character.
+    busy = false,
     tried = {},          -- names tried this session, over and above Data.NPCS
     awaitingConsume = false, -- fired Consumed, waiting for the server to confirm
     consumeDeadline = 0,
     searchRange = 2500,  -- studs to look for a candidate NPC
     announced = false,
+    selected = false,        -- basket is currently the selected item
+    needsProximity = false,  -- a ranged ask was refused: stand on them instead
+    lastRemoteProbe = 0,     -- rate limit on the GetData confirmation
+    refusals = {},        -- per-NPC refusals, before blaming range
 }
 
 -- Current basket state, straight from the game's own live data.
 -- Returns candies, maxCandies, askedByName, hasBasket.
 function _0xa299._0xTBSKState()
-    local candies, asked, have = 0, {}, false
     local maxC = 12
     pcall(function()
         local cfg = require(_0xa299._0xe08d.GameManager).Items["Treat Basket"]
         if cfg and tonumber(cfg.MaxCandies) then maxC = tonumber(cfg.MaxCandies) end
     end)
-    pcall(function()
-        local data = _0xa299._0xLocalData()
-        if type(data) ~= "table" then return end
+
+    local function scan(data)
+        local candies, asked, have = 0, {}, false
+        if type(data) ~= "table" then return candies, asked, have end
         for _, container in pairs({ Inventory = data.Inventory, Loadout = data.Loadout }) do
             if type(container) == "table" then
                 for _, e in pairs(container) do
@@ -28106,8 +28259,41 @@ function _0xa299._0xTBSKState()
                 end
             end
         end
-    end)
-    return candies, maxC, asked, have
+        return candies, asked, have
+    end
+
+    local candies, asked, have = scan(_0xa299._0xLocalData())
+    if have then return candies, maxC, asked, true end
+
+    -- "No basket" out of local data is NOT trustworthy, so confirm a negative
+    -- against the server. That table is the game's own _G.Data and it only
+    -- changes when the SERVER replicates - the same lag that made the cash-in
+    -- re-fire a dozen times - so a basket that was just picked up is not in it
+    -- yet. The old code trusted it, announced "No Treat Basket in inventory"
+    -- and then did nothing until the next replication, which is the "it should
+    -- start the moment I get one" complaint.
+    --
+    -- A positive is trusted as-is: local data never invents an item.
+    --
+    -- Rate limited, because this is on a loop and GetData is expensive -
+    -- measured at 325ms on placeVersion 1579, live.
+    --
+    -- Note for anyone tempted to shortcut the scan: Inventory is keyed by
+    -- STRING slot numbers, so `#data.Inventory` is 0 even on a full bag (154
+    -- slots, measured). It has to be walked with pairs.
+    local S = _0xa299._0xTBSK
+    if tick() - (S.lastRemoteProbe or 0) >= 5 then
+        S.lastRemoteProbe = tick()
+        local ok, pdata = pcall(function()
+            local df = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
+            return df:InvokeServer("GetData")
+        end)
+        if ok then
+            local c2, a2, h2 = scan(pdata)
+            if h2 then return c2, maxC, a2, true end
+        end
+    end
+    return candies, maxC, asked, false
 end
 
 -- Nearest NPC we have not asked yet. An NPC is anything with a Humanoid and a
@@ -28166,13 +28352,18 @@ function _0xa299._0xTBSKRun()
                 local S = _0xa299._0xTBSK
                 local B = _0xa299._0xb81e
 
-                -- DO NOT TAKE THE CHARACTER while the farm owns it for
-                -- something that matters. Loot collection parks on the point
-                -- for 14s and the hide / low-HP paths are there for safety, so
-                -- stealing the character mid-way meant this and the heartbeat
-                -- teleported against each other every frame.
-                if B.isCollectingLoot or B.hiding or B.playerHiding
-                   or B.isRecoveringHP or B.serverHopPending then
+                -- Defer only while we must genuinely be inert or are in
+                -- transit: hidden from a sensor or a player, mid server hop, or
+                -- part-way through a Corrupted Point menu round trip (where a
+                -- remote would just fail).
+                --
+                -- isCollectingLoot and isRecoveringHP are deliberately NOT in
+                -- this list any more. They are character-POSITION states, and
+                -- asking no longer moves the character, so there is nothing to
+                -- collide over -- which is what lets a basket get filled the
+                -- moment it turns up instead of waiting out a 14s loot park.
+                if B.hiding or B.playerHiding or B.serverHopPending
+                   or (_0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy) then
                     S.busy = false
                     return
                 end
@@ -28196,6 +28387,8 @@ function _0xa299._0xTBSKRun()
                         -- the local shortlist has to go too or every NPC used
                         -- on the last basket would be skipped.
                         S.tried = {}
+                        S.selected = false
+                        S.refusals = {}
                         _0xa299._0x8545:Notify("Farm",
                             "Treat Basket cashed in (" .. maxC .. " candies)", 3, "check")
                     elseif tick() > (S.consumeDeadline or 0) then
@@ -28237,40 +28430,102 @@ function _0xa299._0xTBSKRun()
                     return
                 end
 
+                -- STREAMED IN is the only real requirement. Re-check here
+                -- rather than trusting the pick: streaming can take the model
+                -- away between choosing it and asking, and asking about a
+                -- detached part would burn the NPC for nothing.
                 local nHrp = npc:FindFirstChild("HumanoidRootPart")
-                if not nHrp then S.busy = false; return end
+                if not (nHrp and npc:IsDescendantOf(workspace)) then
+                    S.busy = false
+                    return
+                end
 
-                -- Held for the WHOLE trip and deliberately NOT released at the
-                -- end of it: it stays set while there is still basket work to
-                -- do, and is only dropped by the paths above that mean "idle".
-                -- Releasing it per NPC let the heartbeat drag us back to the
-                -- point between every single one.
-                S.busy = true
-                _0xa299._0xTBSKSelect()
-                task.wait(0.2)
+                -- The basket has to be the selected item for this to count.
+                -- Selected ONCE, not before every ask: re-sending
+                -- Item/Selected for the same item every second is not something
+                -- a player does. The refusal path below clears the flag, so a
+                -- selection clobbered by the farm's weapon handling is picked
+                -- up again on the next pass.
+                if not S.selected then
+                    _0xa299._0xTBSKSelect()
+                    S.selected = true
+                    task.wait(0.2)
+                end
 
-                -- Stand on the NPC facing it: findNearbyNPC only looks in a
-                -- small box in front of the character.
-                local char = _0xa299._0x396d.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    _0xa299._0xVelSettle(hrp)
-                    hrp.CFrame = CFrame.lookAt(
-                        nHrp.Position + Vector3.new(0, 0, 3), nHrp.Position)
-                    task.wait(0.25)
+                -- Normally NO movement at all - see the notes at the top of this
+                -- section. busy stays clear so the farm keeps the character and
+                -- carries on farming while the basket fills.
+                if S.needsProximity then
+                    local char = _0xa299._0x396d.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        S.busy = true          -- only now do we own the character
+                        _0xa299._0xVelSettle(hrp)
+                        hrp.CFrame = CFrame.lookAt(
+                            nHrp.Position + Vector3.new(0, 0, 3), nHrp.Position)
+                        task.wait(0.25)
+                    end
                 end
 
                 local gotTreat = false
                 pcall(function()
-                    gotTreat = _0xa299._0xe08d:WaitForChild("Events")
+                    local df = _0xa299._0xe08d:WaitForChild("Events")
                         :WaitForChild("DataFunction")
-                        :InvokeServer("trickOrTreat", nHrp) and true or false
+                    gotTreat = df:InvokeServer("trickOrTreat", nHrp) and true or false
                 end)
 
-                -- Asked either way, so never retry this one on this basket.
-                S.tried[npc.Name] = true
-                _0xa299._0xded8("treat_basket", npc.Name,
-                    (gotTreat and "Treat" or "Trick") .. "  " .. candies .. "/" .. maxC)
+                if gotTreat then
+                    S.tried[npc.Name] = true
+                    _0xa299._0xded8("treat_basket", npc.Name,
+                        "Treat  " .. math.min(candies + 1, maxC) .. "/" .. maxC)
+                    task.wait(0.4)
+                    return
+                end
+
+                -- Falsy means a trick OR a refused call, and those must not be
+                -- treated alike: a trick uses the NPC up, a refusal does not.
+                -- The game records every NPC it ACCEPTED in the basket's own
+                -- NPCS list, so that list is the discriminator.
+                local accepted = false
+                local waitUntil = tick() + 2
+                repeat
+                    task.wait(0.2)
+                    local _, _, nowAsked = _0xa299._0xTBSKState()
+                    if nowAsked[npc.Name] then accepted = true end
+                until accepted or tick() > waitUntil
+
+                if accepted then
+                    -- A real trick. Used up, so move to a different NPC.
+                    S.refusals[npc.Name] = nil
+                    S.tried[npc.Name] = true
+                    _0xa299._0xded8("treat_basket", npc.Name,
+                        "Trick  " .. candies .. "/" .. maxC)
+                elseif (S.refusals[npc.Name] or 0) < 1 then
+                    -- First refusal for this NPC, and the likeliest cause is
+                    -- not range at all: the farm unequips and selects items of
+                    -- its own, so our basket selection may simply have been
+                    -- clobbered. Re-select and let the next pass retry this
+                    -- same NPC. It is NOT burned - the server never took it.
+                    --
+                    -- Doing this before blaming range matters, or one clobbered
+                    -- selection would switch the whole feature over to
+                    -- teleporting for the rest of the session.
+                    S.refusals[npc.Name] = (S.refusals[npc.Name] or 0) + 1
+                    S.selected = false
+                elseif not S.needsProximity then
+                    -- Refused twice, the second time with the basket freshly
+                    -- selected. So this server really does validate range:
+                    -- learn it once and stand on them from here on.
+                    S.needsProximity = true
+                    S.selected = false
+                    _0xa299._0x8545:Notify("Farm",
+                        "Treat Basket: ranged ask refused, standing on NPCs instead", 3, "info")
+                else
+                    -- Stood on them, selected, still nothing: this one is not
+                    -- trick-or-treatable at all, so stop picking it.
+                    S.tried[npc.Name] = true
+                    S.selected = false
+                end
                 task.wait(0.4)
             end)
             if not ok then _0xa299._0xTBSK.busy = false end
@@ -28285,6 +28540,8 @@ function _0xa299._0xTBSKStop()
     _0xa299._0xTBSK.busy = false
     _0xa299._0xTBSK.awaitingConsume = false
     _0xa299._0xTBSK.consumeDeadline = 0
+    _0xa299._0xTBSK.selected = false
+    _0xa299._0xTBSK.refusals = {}
     if _0xa299._0xTBSK.connection then
         pcall(function() task.cancel(_0xa299._0xTBSK.connection) end)
         _0xa299._0xTBSK.connection = nil
@@ -29141,7 +29398,21 @@ function _0xa299._0xc0db()
         -- Same standoff for the Corrupted Point cycle: it walks us to a board,
         -- a marker and back through the menu, and this loop re-pins to the
         -- safespot every frame.
-        if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then return end
+        --
+        -- But standing off must not mean going blind. Chakra sense is still
+        -- evaluated here and raised as a flag the cycle reads at its next step
+        -- boundary, where it parks at the safespot and drops busy -- and then
+        -- the real hide below runs on the following frame.
+        --
+        -- Deliberately a FLAG and not the hide itself: the hide moves the
+        -- character every frame, and doing that while the cycle is mid-travel
+        -- would just make the two fight, which is the Treat Basket bug again.
+        if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then
+            if _0xa299._0x6378 and _0xa299._0x2008 then
+                _0xa299._0xHLWNCP.abortRequested = true
+            end
+            return
+        end
 
         -- Bank ryo as soon as there is some and we are out of combat. Driven
         -- from here rather than from the post-loot block so it does not wait
@@ -29198,11 +29469,20 @@ function _0xa299._0xc0db()
                     task.wait(0.5)
                 end
                 
-                if _0xa299._0xb81e.enabled and currentHumanoid and currentHumanoid.Parent then
-                    _0xa299._0x8545:Notify("Farm", "HP restored (" .. math.floor(currentHumanoid.Health) .. ") - Resuming farm", 3, "check")
-                    _0xa299._0xb81e.animTrack = _0xa299._0xFarmAnimRefresh()
-                end
+                -- Cleared BEFORE the resume below, or _0xHLWNResumeAnim would
+                -- still see this flag set and decline to resume.
                 _0xa299._0xb81e.isRecoveringHP = false
+
+                if _0xa299._0xb81e.enabled and currentHumanoid and currentHumanoid.Parent then
+                    -- Guarded: HP can come back while a sensor is still watching
+                    -- or a player is still stood on the point, and this used to
+                    -- restart the farming animation regardless.
+                    _0xa299._0x8545:Notify("Farm", "HP restored ("
+                        .. math.floor(currentHumanoid.Health) .. ")"
+                        .. (_0xa299._0xHLWNStillDark() and " - still hidden"
+                            or " - Resuming farm"), 3, "check")
+                    _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
+                end
             end)
             return
         end
@@ -29236,7 +29516,7 @@ function _0xa299._0xc0db()
                 if _0xa299._0xb81e.playerHiding then
                     _0xa299._0xb81e.playerHiding = false
                     _0xa299._0x8545:Notify("Farm", "Found another point, moving", 2, "check")
-                    _0xa299._0xb81e.animTrack = _0xa299._0xFarmAnimRefresh()
+                    _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
                 end
                 -- Don't return - let the code below handle farming the new point
             else
@@ -29253,8 +29533,8 @@ function _0xa299._0xc0db()
         else
             if _0xa299._0xb81e.playerHiding then
                 _0xa299._0xb81e.playerHiding = false
-                _0xa299._0x8545:Notify("Farm", "Halloween Farm: Player left, back to farming", 2, "check")
-                _0xa299._0xb81e.animTrack = _0xa299._0xFarmAnimRefresh()
+                _0xa299._0x8545:Notify("Farm", "Halloween Farm: Player left" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
+                _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
             end
         end
         
@@ -29307,8 +29587,8 @@ function _0xa299._0xc0db()
                 _0xa299._0xb81e.hiding = false
                 -- Remove spoof protection when threat is gone
                 _0xa299._0x220a.removeSpoofProtection()
-                _0xa299._0x8545:Notify("Farm", "Halloween Farm: Chakra Sense gone, back to farming", 2, "check")
-                _0xa299._0xb81e.animTrack = _0xa299._0xFarmAnimRefresh()
+                _0xa299._0x8545:Notify("Farm", "Halloween Farm: Chakra Sense gone" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
+                _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
             end
         end
         
@@ -29786,8 +30066,8 @@ function _0xa299._0xc0db()
                     _0xa299._0xb81e.hiding = false
                     -- Remove spoof protection when threat is gone
                     _0xa299._0x220a.removeSpoofProtection()
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Chakra Sense gone, back to farming", 2, "check")
-                    _0xa299._0xb81e.animTrack = _0xa299._0xFarmAnimRefresh()
+                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Chakra Sense gone" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
+                    _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
                 end
             end
             
@@ -29835,8 +30115,8 @@ function _0xa299._0xc0db()
             else
                 if _0xa299._0xb81e.playerHiding then
                     _0xa299._0xb81e.playerHiding = false
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Player left, back to farming", 2, "check")
-                    _0xa299._0xb81e.animTrack = _0xa299._0xFarmAnimRefresh()
+                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Player left" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
+                    _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
                 end
             end
             
