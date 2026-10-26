@@ -27893,9 +27893,11 @@ end
 -- Chakra sense is tested the way the boss farm tests it, `_0x6378 and _0x2008`,
 -- so a stale observed flag with the notifier off cannot pin this.
 ---------------------------------------------------------------------
-function _0xa299._0xHLWNCPAbort()
+-- Shared "we should not be standing out in the open right now" test. Used by
+-- both things that walk the character somewhere exposed: the Corrupted Point
+-- cycle and the boss arena visit.
+function _0xa299._0xHLWNUnsafe()
     local B = _0xa299._0xb81e
-    if _0xa299._0xHLWNCP.abortRequested then return "chakra sense" end
     if not B.enabled then return "farm stopped" end
     if _0xa299._0x6378 and _0xa299._0x2008 then return "chakra sense" end
     if B.hiding then return "chakra sense" end
@@ -27903,6 +27905,11 @@ function _0xa299._0xHLWNCPAbort()
     if B.isRecoveringHP then return "low HP" end
     if B.serverHopPending then return "server hop" end
     return nil
+end
+
+function _0xa299._0xHLWNCPAbort()
+    if _0xa299._0xHLWNCP.abortRequested then return "chakra sense" end
+    return _0xa299._0xHLWNUnsafe()
 end
 
 function _0xa299._0xHLWNCPCycle()
@@ -28169,8 +28176,12 @@ end
 -- recognise that and skip it. The other three have no such twin, so they
 -- simply leave it nil.
 --
--- playerAnchor is where the player-nearby check measures from. Barbarit has a
--- hand-measured one; the rest fall back to their spawnPosition.
+-- There is deliberately no hand-measured player-detection anchor here any
+-- more. Barbarit had one, 43.4 studs from its real spawn, and since the
+-- player check measured from it a player standing ON the boss came out beyond
+-- a 40-stud range and was missed. The anchor now comes from the live boss or
+-- the config, and _0xHLWNPlayerNear also measures from the character, so no
+-- hand-copied coordinate can break the check again.
 ---------------------------------------------------------------------
 _0xa299._0xHLWNBossMethods = {
     ["Barbarit The Hallowed"] = {
@@ -28179,7 +28190,6 @@ _0xa299._0xHLWNBossMethods = {
         invalidName   = "Barbarit The Rose",
         label         = "Barbarit",
         offset        = 10.5,
-        playerAnchor  = Vector3.new(-1020.713, 261.861, -1455.114),
     },
     ["Hallowed Tairock"] = {
         cfgKey        = "Tairock",
@@ -28237,7 +28247,7 @@ end
 -- revisit window then stops it walking to the same arena over and over.
 ---------------------------------------------------------------------
 _0xa299._0xHLWNArenaRevisit = 20   -- seconds before walking to the same arena again
-_0xa299._0xHLWNArena = { visiting = false, at = {} }
+_0xa299._0xHLWNArena = { visiting = false, at = {}, abort = false }
 
 function _0xa299._0xHLWNVisitArena()
     local anchor = _0xa299._0xHLWNBossNum("streamPos", nil)
@@ -28247,6 +28257,11 @@ function _0xa299._0xHLWNVisitArena()
 
     local S = _0xa299._0xHLWNArena
     if S.visiting then return false end
+
+    -- Do not set off at all while we should be hidden. The Heartbeat would
+    -- normally catch this, but it stands off for the length of the trip.
+    if _0xa299._0xHLWNUnsafe() then return false end
+    S.abort = false
 
     local key = _0xa299._0xb81e.method
     if tick() - (S.at[key] or 0) < (_0xa299._0xHLWNArenaRevisit or 20) then
@@ -28263,10 +28278,11 @@ function _0xa299._0xHLWNVisitArena()
             _0xa299._0xSTP(anchor)
             task.wait(0.4)
 
-            -- Nothing there after all. Don't leave the character parked in a
-            -- far arena in the open: the caller will either rotate to the next
-            -- method or hop, and both want us back at the safespot.
-            if not _0xa299._0xf63f() then
+            -- Retreat if a sensor or a player turned up while we were in
+            -- transit, or if the boss is not there after all. Either way we
+            -- must not be left parked in a far arena in the open.
+            local unsafe = S.abort or _0xa299._0xHLWNUnsafe()
+            if unsafe or not _0xa299._0xf63f() then
                 _0xa299._0xSTP(_0xa299._0xdde4())
             end
         end)
@@ -28275,20 +28291,95 @@ function _0xa299._0xHLWNVisitArena()
     return true
 end
 
+---------------------------------------------------------------------
+-- IS ANYONE NEAR?
+--
+-- Checks `range` around US **and** around the spot we are working on, because
+-- those answer different questions and the farm needs both:
+--
+--   * near US is "can someone see what I am doing", and it was missing
+--     entirely. The boss path measured ONLY from the arena anchor.
+--   * near the TARGET is "is someone camping the thing I am about to fly to",
+--     which is worth knowing before going there.
+--
+-- Why that mattered: Barbarit's hand-measured anchor sat 43.4 studs from the
+-- boss's actual spawn. So on a 40-stud detection range, a player standing ON
+-- the boss - and therefore right on top of us - measured 43.4 and was NOT
+-- detected, then flickered into detection the moment they wandered a few studs
+-- toward the anchor. Nothing random about it; the reference point was wrong.
+--
+-- Measuring from the character as well makes this robust to an anchor being
+-- off, which is the real lesson: a safety check should not depend on a
+-- hand-copied coordinate being accurate.
+---------------------------------------------------------------------
+function _0xa299._0xHLWNPlayerNear(range, targetPos)
+    if not range then return false end
+
+    local me = _0xa299._0x396d.Character
+    local myHrp = me and me:FindFirstChild("HumanoidRootPart")
+    local mine = myHrp and myHrp.Position or nil
+    if not (mine or targetPos) then return false end
+
+    for _, p in ipairs(_0xa299._0x71bb:GetPlayers()) do
+        if p ~= _0xa299._0x396d and p.Character then
+            local h = p.Character:FindFirstChild("HumanoidRootPart")
+            if h then
+                if mine and (h.Position - mine).Magnitude < range then return true end
+                if targetPos and (h.Position - targetPos).Magnitude < range then return true end
+            end
+        end
+    end
+    return false
+end
+
+-- A positional config field as a Vector3, whatever shape it is stored in.
+function _0xa299._0xHLWNBossPos(field)
+    local v = _0xa299._0xHLWNBossNum(field, nil)
+    if typeof(v) == "CFrame" then return v.Position end
+    if typeof(v) == "Vector3" then return v end
+    return nil
+end
+
+-- Where this boss SPAWNS, for the "is this the arena boss" sanity check in
+-- _0xf63f. Deliberately spawnPosition only: nil means the boss has no arena to
+-- be near, and that check is skipped rather than widened to rewardspos, which
+-- would start rejecting a boss that happens to be more than 400 studs from its
+-- reward chest.
+function _0xa299._0xHLWNBossSpawn()
+    return _0xa299._0xHLWNBossPos("spawnPosition")
+end
+
 -- Where the player-nearby check measures from.
+--
+-- This used to be a hand-measured anchor or spawnPosition, which returned NIL
+-- for Tairock and Chakra Knight - neither has a spawnPosition - so the player
+-- loop iterated an empty list and Safe Teleport was silently doing nothing at
+-- all on those two methods.
 function _0xa299._0xHLWNBossAnchor()
     local m = _0xa299._0xHLWNBossCfg()
     if not m then return nil end
-    if m.playerAnchor then return m.playerAnchor end
-    local sp = _0xa299._0xHLWNBossNum("spawnPosition", nil)
-    if typeof(sp) == "CFrame" then return sp.Position end
-    if typeof(sp) == "Vector3" then return sp end
-    return nil
+
+    -- The LIVE boss first. That is literally the question being asked - is a
+    -- player near the boss we are farming - and it is the only anchor that
+    -- stays right for a boss that has moved off its spawn.
+    local boss = workspace:FindFirstChild(m.halloweenName)
+    local bhrp = boss and (boss:FindFirstChild("HumanoidRootPart")
+        or boss:FindFirstChild("Torso"))
+    if bhrp then return bhrp.Position end
+
+
+    -- Not streamed in yet: fall back to wherever the config says it lives.
+    -- streamPos/rewardspos are what make this work for Tairock and Chakra
+    -- Knight, and they are the same anchors the arena visit travels to.
+    return _0xa299._0xHLWNBossSpawn()
+        or _0xa299._0xHLWNBossPos("streamPos")
+        or _0xa299._0xHLWNBossPos("rewardspos")
 end
 
 _0xa299._0xHLWNBossFarmKeys = {
     ["Barbarit The Rose"] = { key = "Barbarit The Rose", fallback = 12.5 },
-    ["Tairock"]           = { key = "Tairock",           fallback = 8 },
+    -- Pinned at 7.6 for this farm; the Boss Farm's Tairock stays at 8.
+    ["Tairock"]           = { key = "Tairock",           fallback = 8, override = 7.6 },
     -- These two were missing, so they fell through to the mob default of -8.5
     -- and got farmed from BELOW. They are bosses: hover above them, with the
     -- Boss Farm's own number. Note the config key is "Lava Rosa" while the
@@ -28301,6 +28392,16 @@ _0xa299._0xHLWNBossFarmKeys = {
 function _0xa299._0xHLWNBossFarmOffset(base)
     local entry = _0xa299._0xHLWNBossFarmKeys[base]
     if not entry then return nil end
+
+    -- A pinned `override` wins over the Boss Farm config, which is the whole
+    -- point of it: this farm hovers at its own height for that boss and a
+    -- retune on the Boss Farm side must not move it.
+    --
+    -- NOT what `fallback` does - that only applies when the config cannot be
+    -- read at all, so setting it would have had no effect while the config is
+    -- present and would have gone unnoticed.
+    if entry.override then return entry.override end
+
     local off = entry.fallback
     pcall(function()
         local cfg = _0xa299._0x5ecb and _0xa299._0x5ecb[entry.key]
@@ -29028,7 +29129,11 @@ function _0xa299._0xf63f()
             -- no spawnPosition in the config (Tairock, Chakra Knight) have no
             -- arena to be near, so the distance test is SKIPPED rather than
             -- measured against a nil and rejecting every boss forever.
-            local anchor = _0xa299._0xHLWNBossAnchor()
+            --
+            -- _0xHLWNBossSpawn, NOT _0xHLWNBossAnchor: that one now prefers the
+            -- live boss position, which would make this ask whether the boss is
+            -- within 400 studs of itself.
+            local anchor = _0xa299._0xHLWNBossSpawn()
             if not anchor then
                 return boss, humanoid, false
             end
@@ -29709,7 +29814,18 @@ function _0xa299._0xc0db()
 
         -- Walking to a boss arena moves the character and this loop re-pins
         -- every frame, so stand off for the trip - same reason as below.
-        if _0xa299._0xHLWNArena and _0xa299._0xHLWNArena.visiting then return end
+        --
+        -- Standing off must not mean going blind: chakra sense is still read
+        -- here and raised as a flag the trip checks on arrival, where it
+        -- retreats to the safespot. A flag rather than hiding on the spot,
+        -- because hiding moves the character every frame and would fight the
+        -- trip for it.
+        if _0xa299._0xHLWNArena and _0xa299._0xHLWNArena.visiting then
+            if _0xa299._0x6378 and _0xa299._0x2008 then
+                _0xa299._0xHLWNArena.abort = true
+            end
+            return
+        end
 
         -- Same standoff for the Corrupted Point cycle: it walks us to a board,
         -- a marker and back through the menu, and this loop re-pins to the
@@ -30421,27 +30537,17 @@ function _0xa299._0xc0db()
                 end
             end
             
-            -- Check for nearby players (use same detection as PumpkinPoint method)
-            -- Per-boss anchor: Barbarit has a hand-measured one, the rest fall
-            -- back to their spawnPosition. nil means there is no arena to
-            -- watch, so the loop below simply finds nobody.
-            local barbaritSpawnLocation = _0xa299._0xHLWNBossAnchor()
-            local playerNearbyBarbarit = false
-            -- Same gate as the point path: this uses Safe Teleport's detection
-            -- range, so it only applies when that feature is enabled.
+            -- Check for nearby players.
+            --
+            -- Measured around US as well as around the boss - see
+            -- _0xa299._0xHLWNPlayerNear for why. The old version used only the
+            -- arena anchor, which is 43 studs off Barbarit's real spawn, so a
+            -- player standing on the boss did not register on a 40-stud range.
             local safeTPBarbarit = (_0xa299._0x220a and _0xa299._0x220a.enabled) and true or false
             local detectionRange = (_0xa299._0x220a and _0xa299._0x220a.detectionRange) or 100
-            for _, otherPlayer in pairs((safeTPBarbarit and barbaritSpawnLocation)
-                    and _0xa299._0x71bb:GetPlayers() or {}) do
-                if otherPlayer ~= _0xa299._0x396d and otherPlayer.Character and otherPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                    local otherHrp = otherPlayer.Character.HumanoidRootPart
-                    local distance = (otherHrp.Position - barbaritSpawnLocation).Magnitude
-                    if distance < detectionRange then
-                        playerNearbyBarbarit = true
-                        break
-                    end
-                end
-            end
+            local playerNearbyBarbarit = safeTPBarbarit
+                and _0xa299._0xHLWNPlayerNear(detectionRange, _0xa299._0xHLWNBossAnchor())
+                or false
             
             if playerNearbyBarbarit then
                 -- Server hop if player detected option enabled
@@ -30775,6 +30881,11 @@ function _0xa299._0xefc6()
     -- switched off would leave the Heartbeat standing off for good next time.
     _0xa299._0xHLWNCP.busy = false
     _0xa299._0xHLWNCP.unavailableUntil = 0
+    -- Drop the arena-trip latch too, or a trip interrupted by the farm being
+    -- switched off leaves the Heartbeat standing off for good next run.
+    _0xa299._0xHLWNArena.visiting = false
+    _0xa299._0xHLWNArena.abort = false
+    _0xa299._0xHLWNArena.at = {}
     -- Both methods start fresh next run.
     _0xa299._0xb81e.methodExhausted = {}
     _0xa299._0xb81e.hiding = false
