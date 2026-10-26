@@ -27527,6 +27527,9 @@ _0xa299._0xb81e = {
 _0xa299._0x891f = {
     "PumpkinPoint",
     "Barbarit The Hallowed",
+    "Hallowed Tairock",
+    "Hallowed Chakra Knight",
+    "Hallowed Lavarossa",
 }
 
 ---------------------------------------------------------------------
@@ -27552,9 +27555,15 @@ _0xa299._0x891f = {
 ---------------------------------------------------------------------
 _0xa299._0xHLWNMethods     = {}   -- selected set, from the Farm Methods dropdown
 _0xa299._0xHLWNMethodRetry = 60   -- seconds before a method that gave up is retried
-_0xa299._0xHLWNOther = {
-    ["PumpkinPoint"]          = "Barbarit The Hallowed",
-    ["Barbarit The Hallowed"] = "PumpkinPoint",
+-- Rotation order: every boss method first, Pumpkin Point last. That is the
+-- order asked for - spawn and fight the boss, then do the points, then round
+-- again - and it generalises to any number of methods being selected.
+_0xa299._0xHLWNMethodOrder = {
+    "Barbarit The Hallowed",
+    "Hallowed Tairock",
+    "Hallowed Chakra Knight",
+    "Hallowed Lavarossa",
+    "PumpkinPoint",
 }
 
 function _0xa299._0xHLWNMethodOn(name)
@@ -27589,10 +27598,29 @@ function _0xa299._0xHLWNHandOver(reason)
     local cur = B.method
     B.methodExhausted[cur] = tick()
 
-    local other = _0xa299._0xHLWNOther[cur]
+    -- Next selected, non-exhausted method AFTER the current one, wrapping -
+    -- so with several picked they take turns instead of two of them hogging
+    -- it. Returns false when every other one is unselected or exhausted,
+    -- which is the caller's cue to hop or wait exactly as before.
+    local order = _0xa299._0xHLWNMethodOrder
+    local at = 0
+    for i, n in ipairs(order) do
+        if n == cur then
+            at = i
+            break
+        end
+    end
+
+    local other
+    for step = 1, #order do
+        local n = order[((at - 1 + step) % #order) + 1]
+        if n ~= cur and _0xa299._0xHLWNMethodOn(n)
+           and _0xa299._0xHLWNMethodFresh(n) then
+            other = n
+            break
+        end
+    end
     if not other then return false end
-    if not _0xa299._0xHLWNMethodOn(other) then return false end
-    if not _0xa299._0xHLWNMethodFresh(other) then return false end
 
     B.method = other
 
@@ -27635,13 +27663,11 @@ function _0xa299._0xHLWNHandOver(reason)
     return true
 end
 
--- Which method to begin on. Barbarit first when both are selected, as asked.
+-- Which method to begin on: the first selected one in rotation order, so a
+-- boss always comes before Pumpkin Point.
 function _0xa299._0xHLWNFirstMethod()
-    if _0xa299._0xHLWNMethodOn("Barbarit The Hallowed") then
-        return "Barbarit The Hallowed"
-    end
-    if _0xa299._0xHLWNMethodOn("PumpkinPoint") then
-        return "PumpkinPoint"
+    for _, n in ipairs(_0xa299._0xHLWNMethodOrder) do
+        if _0xa299._0xHLWNMethodOn(n) then return n end
     end
     return _0xa299._0xb81e.method
 end
@@ -28120,12 +28146,145 @@ end
 
 -- Bosses whose hover height the Boss Farm already tunes, keyed by the base name
 -- _0xEventBase resolves to. Value is the fallback if that config cannot be read.
--- Hover height for the Halloween Barbarit METHOD, above the boss.
+---------------------------------------------------------------------
+-- HALLOWEEN BOSS METHODS
 --
--- Its own number on purpose: the Boss Farm's Barbarit config is still 12.5 and
--- is not read here, so retuning one does not move the other. The dodge
--- (dangerAnimOffset, +2) and the NPC offset slider still apply on top.
-_0xa299._0xHLWNBarbaritOffset = 10.5
+-- Barbarit used to be the only one, with its names, spawn, dodge animation and
+-- hover height written straight into the heartbeat branch. All four now share
+-- that same branch, driven by this table, so the 372 lines of hide / grip /
+-- loot / respawn handling exist once rather than four times.
+--
+-- Numbers come from the Boss Farm's own config (_0x5ecb) through
+-- _0xHLWNBossNum, so the two cannot drift: spawnPosition, spawnEvent,
+-- dangerAnim, dangerAnimOffset and dangerTime are all read from there. An
+-- `offset` here overrides it, which is how the Barbarit method sits at 10.5
+-- while the Boss Farm stays at 12.5.
+--
+-- halloweenName is the ONLY name farmed. The base boss and the other seasonal
+-- variants are deliberately not targeted, which is what "only target the
+-- halloween version" means.
+--
+-- invalidName is the wrong-boss case, and only Barbarit has one: its arena
+-- spawns "Barbarit The Rose" when no event variant is up, and the farm has to
+-- recognise that and skip it. The other three have no such twin, so they
+-- simply leave it nil.
+--
+-- playerAnchor is where the player-nearby check measures from. Barbarit has a
+-- hand-measured one; the rest fall back to their spawnPosition.
+---------------------------------------------------------------------
+_0xa299._0xHLWNBossMethods = {
+    ["Barbarit The Hallowed"] = {
+        cfgKey        = "Barbarit The Rose",
+        halloweenName = "Barbarit The Hallowed",
+        invalidName   = "Barbarit The Rose",
+        label         = "Barbarit",
+        offset        = 10.5,
+        playerAnchor  = Vector3.new(-1020.713, 261.861, -1455.114),
+    },
+    ["Hallowed Tairock"] = {
+        cfgKey        = "Tairock",
+        halloweenName = "Hallowed Tairock",
+        label         = "Tairock",
+    },
+    ["Hallowed Chakra Knight"] = {
+        cfgKey        = "Chakra Knight",
+        halloweenName = "Hallowed Chakra Knight",
+        label         = "Chakra Knight",
+    },
+    ["Hallowed Lavarossa"] = {
+        cfgKey        = "Lava Rosa",          -- NOT "Lavarossa": that is the
+        halloweenName = "Hallowed Lavarossa", -- workspace name, this is the key
+        label         = "Lavarossa",
+    },
+}
+
+-- The boss method running now, or nil when the current method is not one.
+function _0xa299._0xHLWNBossCfg()
+    return _0xa299._0xHLWNBossMethods[_0xa299._0xb81e.method]
+end
+
+-- A field for the current boss method: this table first, then the Boss Farm's
+-- config for that boss, then the fallback.
+function _0xa299._0xHLWNBossNum(field, fallback)
+    local m = _0xa299._0xHLWNBossCfg()
+    if not m then return fallback end
+    if m[field] ~= nil then return m[field] end
+
+    local v
+    pcall(function()
+        local cfg = _0xa299._0x5ecb and _0xa299._0x5ecb[m.cfgKey]
+        if cfg then v = cfg[field] end
+    end)
+    if v ~= nil then return v end
+    return fallback
+end
+
+---------------------------------------------------------------------
+-- PULLING A NON-SUMMONED BOSS IN
+--
+-- Tairock and Chakra Knight are not spawned by an event: they are already in
+-- the world, just outside our streaming radius. So there is nothing to fire,
+-- and waiting at the safespot would never reveal them - the farm has to go to
+-- their arena and let streaming do the rest.
+--
+-- The Boss Farm solves this with _0xVisitArena and _0xStreamAllBosses, keyed
+-- off `streamPos or rewardspos or spawnPosition`. Same anchors here, so the two
+-- cannot disagree about where a boss lives. For Tairock and Chakra Knight that
+-- is their rewardspos.
+--
+-- Spawned behind a latch because _0xSTP yields and this is driven from the
+-- farm's Heartbeat: without it every frame would start another trip. The
+-- revisit window then stops it walking to the same arena over and over.
+---------------------------------------------------------------------
+_0xa299._0xHLWNArenaRevisit = 20   -- seconds before walking to the same arena again
+_0xa299._0xHLWNArena = { visiting = false, at = {} }
+
+function _0xa299._0xHLWNVisitArena()
+    local anchor = _0xa299._0xHLWNBossNum("streamPos", nil)
+        or _0xa299._0xHLWNBossNum("rewardspos", nil)
+        or _0xa299._0xHLWNBossNum("spawnPosition", nil)
+    if not anchor then return false end
+
+    local S = _0xa299._0xHLWNArena
+    if S.visiting then return false end
+
+    local key = _0xa299._0xb81e.method
+    if tick() - (S.at[key] or 0) < (_0xa299._0xHLWNArenaRevisit or 20) then
+        return false
+    end
+    S.at[key] = tick()
+    S.visiting = true
+
+    task.spawn(function()
+        pcall(function()
+            -- Request the region, then travel. _0xStreamAround is throttled and
+            -- _0xSTP makes its own request, so this costs nothing extra.
+            _0xa299._0xStreamAround(anchor.Position, 5)
+            _0xa299._0xSTP(anchor)
+            task.wait(0.4)
+
+            -- Nothing there after all. Don't leave the character parked in a
+            -- far arena in the open: the caller will either rotate to the next
+            -- method or hop, and both want us back at the safespot.
+            if not _0xa299._0xf63f() then
+                _0xa299._0xSTP(_0xa299._0xdde4())
+            end
+        end)
+        S.visiting = false
+    end)
+    return true
+end
+
+-- Where the player-nearby check measures from.
+function _0xa299._0xHLWNBossAnchor()
+    local m = _0xa299._0xHLWNBossCfg()
+    if not m then return nil end
+    if m.playerAnchor then return m.playerAnchor end
+    local sp = _0xa299._0xHLWNBossNum("spawnPosition", nil)
+    if typeof(sp) == "CFrame" then return sp.Position end
+    if typeof(sp) == "Vector3" then return sp end
+    return nil
+end
 
 _0xa299._0xHLWNBossFarmKeys = {
     ["Barbarit The Rose"] = { key = "Barbarit The Rose", fallback = 12.5 },
@@ -28353,8 +28512,7 @@ end
 --     part, so any NPC that is STREAMED IN can be asked from where we stand.
 --     This used to drive the character onto each NPC, which is what made it
 --     fight the farm heartbeat for the character; not moving at all removes
---     that whole class of problem. _0xTBSK.needsProximity is the fallback if a
---     server ever does validate range - it is learned once, from a refusal.
+--     that whole class of problem.
 --   * The return is truthy/falsy, not a string: the client shows its
 --     Option1.Response "Treat!" on success and its Failed.Response "Trick!"
 --     otherwise. Note that falsy covers BOTH a genuine trick AND a refused
@@ -28378,8 +28536,8 @@ end
 _0xa299._0xTBSK = {
     enabled = false,
     connection = nil,
-    -- Farm heartbeat yields while this is set. Now ONLY set on the proximity
-    -- fallback, the one path that still moves the character.
+    -- Farm heartbeat yields while this is set. Nothing in here moves the
+    -- character any more, so it is only used by the idle/defer paths.
     busy = false,
     tried = {},          -- names tried this session, over and above Data.NPCS
     awaitingConsume = false, -- fired Consumed, waiting for the server to confirm
@@ -28387,9 +28545,8 @@ _0xa299._0xTBSK = {
     searchRange = 2500,  -- studs to look for a candidate NPC
     announced = false,
     selected = false,        -- basket is currently the selected item
-    needsProximity = false,  -- a ranged ask was refused: stand on them instead
     lastRemoteProbe = 0,     -- rate limit on the GetData confirmation
-    refusals = {},        -- per-NPC refusals, before blaming range
+    falsyRun = 0,            -- consecutive tricks; a run re-selects the basket
 }
 
 -- Current basket state, straight from the game's own live data.
@@ -28548,7 +28705,6 @@ function _0xa299._0xTBSKRun()
                         -- on the last basket would be skipped.
                         S.tried = {}
                         S.selected = false
-                        S.refusals = {}
                         _0xa299._0x8545:Notify("Farm",
                             "Treat Basket cashed in (" .. maxC .. " candies)", 3, "check")
                     elseif tick() > (S.consumeDeadline or 0) then
@@ -28612,21 +28768,22 @@ function _0xa299._0xTBSKRun()
                     task.wait(0.2)
                 end
 
-                -- Normally NO movement at all - see the notes at the top of this
-                -- section. busy stays clear so the farm keeps the character and
-                -- carries on farming while the basket fills.
-                if S.needsProximity then
-                    local char = _0xa299._0x396d.Character
-                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        S.busy = true          -- only now do we own the character
-                        _0xa299._0xVelSettle(hrp)
-                        hrp.CFrame = CFrame.lookAt(
-                            nHrp.Position + Vector3.new(0, 0, 3), nHrp.Position)
-                        task.wait(0.25)
-                    end
-                end
-
+                -- NO MOVEMENT. Not conditionally, not as a fallback: the
+                -- remote takes the part and does not care where we stand, so
+                -- there is nothing a teleport can achieve here. busy stays
+                -- clear, which is what lets the farm keep the character and
+                -- carry on farming while the basket fills.
+                --
+                -- There WAS a "needsProximity" fallback that learned from a
+                -- refusal and started standing on NPCs. It was wrong, and it
+                -- tripped almost immediately: a TRICK also returns falsy, so
+                -- every trick went into a 2s wait for the NPC to appear in the
+                -- basket's NPCS list, that list is read out of local data,
+                -- and local data only changes when the server replicates - the
+                -- same lag that made the cash-in re-fire. So the name was
+                -- usually not there yet, two tricks looked like two refusals,
+                -- and it switched to teleporting for the rest of the session.
+                -- Calibrating off a signal that unreliable was the mistake.
                 local gotTreat = false
                 pcall(function()
                     local df = _0xa299._0xe08d:WaitForChild("Events")
@@ -28634,57 +28791,26 @@ function _0xa299._0xTBSKRun()
                     gotTreat = df:InvokeServer("trickOrTreat", nHrp) and true or false
                 end)
 
+                -- Asked either way, so move to a different NPC regardless. The
+                -- game records it in the basket's NPCS list itself, so a trick
+                -- genuinely uses the NPC up.
+                S.tried[npc.Name] = true
+                _0xa299._0xded8("treat_basket", npc.Name,
+                    (gotTreat and ("Treat  " .. math.min(candies + 1, maxC))
+                               or ("Trick  " .. candies)) .. "/" .. maxC)
+
+                -- Cheap insurance against a basket selection clobbered by the
+                -- farm's own weapon handling, which would turn every ask into
+                -- a trick. A run of them re-selects once; no teleport, and no
+                -- dependence on local data having caught up.
                 if gotTreat then
-                    S.tried[npc.Name] = true
-                    _0xa299._0xded8("treat_basket", npc.Name,
-                        "Treat  " .. math.min(candies + 1, maxC) .. "/" .. maxC)
-                    task.wait(0.4)
-                    return
-                end
-
-                -- Falsy means a trick OR a refused call, and those must not be
-                -- treated alike: a trick uses the NPC up, a refusal does not.
-                -- The game records every NPC it ACCEPTED in the basket's own
-                -- NPCS list, so that list is the discriminator.
-                local accepted = false
-                local waitUntil = tick() + 2
-                repeat
-                    task.wait(0.2)
-                    local _, _, nowAsked = _0xa299._0xTBSKState()
-                    if nowAsked[npc.Name] then accepted = true end
-                until accepted or tick() > waitUntil
-
-                if accepted then
-                    -- A real trick. Used up, so move to a different NPC.
-                    S.refusals[npc.Name] = nil
-                    S.tried[npc.Name] = true
-                    _0xa299._0xded8("treat_basket", npc.Name,
-                        "Trick  " .. candies .. "/" .. maxC)
-                elseif (S.refusals[npc.Name] or 0) < 1 then
-                    -- First refusal for this NPC, and the likeliest cause is
-                    -- not range at all: the farm unequips and selects items of
-                    -- its own, so our basket selection may simply have been
-                    -- clobbered. Re-select and let the next pass retry this
-                    -- same NPC. It is NOT burned - the server never took it.
-                    --
-                    -- Doing this before blaming range matters, or one clobbered
-                    -- selection would switch the whole feature over to
-                    -- teleporting for the rest of the session.
-                    S.refusals[npc.Name] = (S.refusals[npc.Name] or 0) + 1
-                    S.selected = false
-                elseif not S.needsProximity then
-                    -- Refused twice, the second time with the basket freshly
-                    -- selected. So this server really does validate range:
-                    -- learn it once and stand on them from here on.
-                    S.needsProximity = true
-                    S.selected = false
-                    _0xa299._0x8545:Notify("Farm",
-                        "Treat Basket: ranged ask refused, standing on NPCs instead", 3, "info")
+                    S.falsyRun = 0
                 else
-                    -- Stood on them, selected, still nothing: this one is not
-                    -- trick-or-treatable at all, so stop picking it.
-                    S.tried[npc.Name] = true
-                    S.selected = false
+                    S.falsyRun = (S.falsyRun or 0) + 1
+                    if S.falsyRun >= 3 then
+                        S.falsyRun = 0
+                        S.selected = false
+                    end
                 end
                 task.wait(0.4)
             end)
@@ -28701,7 +28827,6 @@ function _0xa299._0xTBSKStop()
     _0xa299._0xTBSK.awaitingConsume = false
     _0xa299._0xTBSK.consumeDeadline = 0
     _0xa299._0xTBSK.selected = false
-    _0xa299._0xTBSK.refusals = {}
     if _0xa299._0xTBSK.connection then
         pcall(function() task.cancel(_0xa299._0xTBSK.connection) end)
         _0xa299._0xTBSK.connection = nil
@@ -28871,25 +28996,43 @@ function _0xa299._0xd574()
     return pumpkinPoint
 end
 
+-- Find the CURRENT boss method's boss. Returns boss, humanoid, isInvalidBoss.
+--
+-- Driven by _0xHLWNBossMethods rather than hardcoded to Barbarit, so Tairock,
+-- Chakra Knight and Lavarossa all use this same finder.
+--
+-- Only the HALLOWEEN name is accepted. The base boss and the other seasonal
+-- variants are deliberately not farmed by these methods.
 function _0xa299._0xf63f()
-    -- Check for invalid "Barbarit The Rose" first
-    local invalidBoss = workspace:FindFirstChild("Barbarit The Rose")
-    if invalidBoss then
-        local humanoid = invalidBoss:FindFirstChildOfClass("Humanoid")
-        if humanoid and humanoid.Health > 0 then
-            return nil, nil, true -- Return invalid flag
+    local m = _0xa299._0xHLWNBossCfg()
+    if not m then return nil, nil, false end
+
+    -- Wrong boss in the arena. Only Barbarit has one: "Barbarit The Rose"
+    -- spawns there when no event variant is up.
+    if m.invalidName then
+        local invalidBoss = workspace:FindFirstChild(m.invalidName)
+        if invalidBoss then
+            local humanoid = invalidBoss:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                return nil, nil, true -- Return invalid flag
+            end
         end
     end
-    
-    -- Check for valid "Barbarit The Hallowed" within 400 studs of spawn (same as boss farm)
-    local spawnPosition = Vector3.new(-1031.22461, 260.756836, -1631.61987)
-    local boss = workspace:FindFirstChild("Barbarit The Hallowed")
+
+    local boss = workspace:FindFirstChild(m.halloweenName)
     if boss then
         local humanoid = boss:FindFirstChildOfClass("Humanoid")
         local bossHrp = boss:FindFirstChild("HumanoidRootPart") or boss:FindFirstChild("Torso")
         if humanoid and humanoid.Health > 0 and bossHrp then
-            local distance = (bossHrp.Position - spawnPosition).Magnitude
-            if distance <= 400 then
+            -- Within 400 studs of its spawn, same as the boss farm. Bosses with
+            -- no spawnPosition in the config (Tairock, Chakra Knight) have no
+            -- arena to be near, so the distance test is SKIPPED rather than
+            -- measured against a nil and rejecting every boss forever.
+            local anchor = _0xa299._0xHLWNBossAnchor()
+            if not anchor then
+                return boss, humanoid, false
+            end
+            if (bossHrp.Position - anchor).Magnitude <= 400 then
                 return boss, humanoid, false
             end
         end
@@ -29564,6 +29707,10 @@ function _0xa299._0xc0db()
         -- without this they fight and neither works.
         if _0xa299._0xTBSK and _0xa299._0xTBSK.busy then return end
 
+        -- Walking to a boss arena moves the character and this loop re-pins
+        -- every frame, so stand off for the trip - same reason as below.
+        if _0xa299._0xHLWNArena and _0xa299._0xHLWNArena.visiting then return end
+
         -- Same standoff for the Corrupted Point cycle: it walks us to a board,
         -- a marker and back through the menu, and this loop re-pins to the
         -- safespot every frame.
@@ -30213,12 +30360,18 @@ function _0xa299._0xc0db()
             _0xa299._0xVelSettle(hrp)
             hrp.CFrame = CFrame.lookAt(pointPosition - Vector3.new(0, -pointOffset, 0), pointPosition)
             
-        elseif _0xa299._0xb81e.method == "Barbarit The Hallowed" then
+        -- ANY boss method, not just Barbarit: Tairock, Chakra Knight and
+        -- Lavarossa run this same branch, parameterised by
+        -- _0xa299._0xHLWNBossMethods. See the notes on that table.
+        elseif _0xa299._0xHLWNBossCfg() then
+            -- Per-boss name for the notifications below, so Tairock does not
+            -- announce itself as Barbarit.
+            local bossLabel = (_0xa299._0xHLWNBossCfg() or {}).label or "Boss"
             -- Check if being observed by chakra sense
             if _0xa299._0x6378 then
                 if not _0xa299._0xb81e.hiding then
                     _0xa299._0xb81e.hiding = true
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Chakra Sense, went to safespot", 2, "info")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " Farm: Chakra Sense, went to safespot", 2, "info")
                     _0xa299._0xFarmAnimPause()
                     
                     -- Unequip weapon when hiding
@@ -30263,19 +30416,23 @@ function _0xa299._0xc0db()
                     _0xa299._0xb81e.hiding = false
                     -- Remove spoof protection when threat is gone
                     _0xa299._0x220a.removeSpoofProtection()
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Chakra Sense gone" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " Farm: Chakra Sense gone" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
                     _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
                 end
             end
             
             -- Check for nearby players (use same detection as PumpkinPoint method)
-            local barbaritSpawnLocation = Vector3.new(-1020.713, 261.861, -1455.114)
+            -- Per-boss anchor: Barbarit has a hand-measured one, the rest fall
+            -- back to their spawnPosition. nil means there is no arena to
+            -- watch, so the loop below simply finds nobody.
+            local barbaritSpawnLocation = _0xa299._0xHLWNBossAnchor()
             local playerNearbyBarbarit = false
             -- Same gate as the point path: this uses Safe Teleport's detection
             -- range, so it only applies when that feature is enabled.
             local safeTPBarbarit = (_0xa299._0x220a and _0xa299._0x220a.enabled) and true or false
             local detectionRange = (_0xa299._0x220a and _0xa299._0x220a.detectionRange) or 100
-            for _, otherPlayer in pairs(safeTPBarbarit and _0xa299._0x71bb:GetPlayers() or {}) do
+            for _, otherPlayer in pairs((safeTPBarbarit and barbaritSpawnLocation)
+                    and _0xa299._0x71bb:GetPlayers() or {}) do
                 if otherPlayer ~= _0xa299._0x396d and otherPlayer.Character and otherPlayer.Character:FindFirstChild("HumanoidRootPart") then
                     local otherHrp = otherPlayer.Character.HumanoidRootPart
                     local distance = (otherHrp.Position - barbaritSpawnLocation).Magnitude
@@ -30290,7 +30447,7 @@ function _0xa299._0xc0db()
                 -- Server hop if player detected option enabled
                 if _0xa299._0xb81e.serverHopIfPlayerDetected then
                     _0xa299._0xb81e.serverHopPending = true
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Player nearby, server hopping", 3, "info")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " Farm: Player nearby, server hopping", 3, "info")
                     _0xa299._0xded8("server_hopping", "", "")
                     hrp.CFrame = _0xa299._0xdde4()
                     task.spawn(function()
@@ -30303,7 +30460,7 @@ function _0xa299._0xc0db()
                 -- Hide at safespot
                 if not _0xa299._0xb81e.playerHiding then
                     _0xa299._0xb81e.playerHiding = true
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Player nearby, went to safespot", 2, "info")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " Farm: Player nearby, went to safespot", 2, "info")
                     _0xa299._0xFarmAnimPause()
                 end
                 _0xa299._0xded8("player_nearby", "", "")
@@ -30312,7 +30469,7 @@ function _0xa299._0xc0db()
             else
                 if _0xa299._0xb81e.playerHiding then
                     _0xa299._0xb81e.playerHiding = false
-                    _0xa299._0x8545:Notify("Farm", "Barbarit Farm: Player left" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " Farm: Player left" .. (_0xa299._0xHLWNStillDark() and ", still hidden" or ", back to farming"), 2, "check")
                     _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
                 end
             end
@@ -30326,7 +30483,7 @@ function _0xa299._0xc0db()
                 -- Offer the work to Pumpkin Point before leaving the server:
                 -- the wrong boss is up, which is nothing to do with whether
                 -- there are points to farm. See _0xa299._0xHLWNHandOver.
-                if _0xa299._0xHLWNHandOver("Invalid Barbarit (The Rose)") then
+                if _0xa299._0xHLWNHandOver(bossLabel .. " (wrong boss)") then
                     return
                 end
 
@@ -30334,7 +30491,7 @@ function _0xa299._0xc0db()
                 if _0xa299._0xb81e.serverHopIfNone and not _0xa299._0xb81e.serverHopPending then
                     _0xa299._0xb81e.serverHopPending = true
                     _0xa299._0xded8("server_hopping", "", "")
-                    _0xa299._0x8545:Notify("Farm", "Invalid Barbarit (The Rose), server hopping", 3, "warning")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " (wrong boss), server hopping", 3, "warning")
                     task.spawn(function()
                         task.wait(3)
                         if _0xa299._0xb81e.enabled and _0xa299._0xb81e.serverHopPending then
@@ -30348,7 +30505,7 @@ function _0xa299._0xc0db()
                     if not _0xa299._0xb81e.waitingAtSafespot then
                         _0xa299._0xb81e.waitingAtSafespot = true
                         _0xa299._0xb81e.safespotWaitEndTime = tick() + 60
-                        _0xa299._0x8545:Notify("Farm", "Invalid Barbarit (The Rose), waiting on respawn", 3, "warning")
+                        _0xa299._0x8545:Notify("Farm", bossLabel .. " (wrong boss), waiting on respawn", 3, "warning")
                     end
                     local remainingTime = math.ceil(_0xa299._0xb81e.safespotWaitEndTime - tick())
                     _0xa299._0xded8("waiting_respawn", "", tostring(remainingTime) .. "s")
@@ -30376,7 +30533,7 @@ function _0xa299._0xc0db()
             if _0xa299._0xb81e.bossLootCollecting then
                 if tick() < _0xa299._0xb81e.bossLootEndTime then
                     local remaining = math.ceil(_0xa299._0xb81e.bossLootEndTime - tick())
-                    _0xa299._0xded8("collecting_loot", "Barbarit", tostring(remaining) .. "s")
+                    _0xa299._0xded8("collecting_loot", bossLabel, tostring(remaining) .. "s")
                     
                     -- Stay at grip position
                     if _0xa299._0xb81e.lastGripPosition then
@@ -30431,7 +30588,7 @@ function _0xa299._0xc0db()
                     -- No Barbarit here. Hand over to Pumpkin Point rather than
                     -- hopping, and only hop once that has nothing either --
                     -- this is the "if there is no more barbarit" case.
-                    if _0xa299._0xHLWNHandOver("No Barbarit after 7s") then
+                    if _0xa299._0xHLWNHandOver("No " .. bossLabel .. " after 7s") then
                         return
                     end
 
@@ -30439,7 +30596,7 @@ function _0xa299._0xc0db()
                         -- Server hop
                         _0xa299._0xb81e.serverHopPending = true
                         _0xa299._0xded8("server_hopping", "", "")
-                        _0xa299._0x8545:Notify("Farm", "No Barbarit after 7s, server hopping", 3, "info")
+                        _0xa299._0x8545:Notify("Farm", "No " .. bossLabel .. " after 7s, server hopping", 3, "info")
                         task.spawn(function()
                             task.wait(1)
                             if _0xa299._0xb81e.enabled and _0xa299._0xb81e.serverHopPending then
@@ -30451,7 +30608,7 @@ function _0xa299._0xc0db()
                     else
                         -- Go to safespot and wait 1 minute
                         _0xa299._0xded8("no_spawn", "", "")
-                        _0xa299._0x8545:Notify("Farm", "No Barbarit after 7s, waiting 1 minute", 3, "info")
+                        _0xa299._0x8545:Notify("Farm", "No " .. bossLabel .. " after 7s, waiting 1 minute", 3, "info")
                         _0xa299._0xb81e.waitingAtSafespot = true
                         _0xa299._0xb81e.safespotWaitEndTime = tick() + 60
                         _0xa299._0xb81e.spawnStartTime = nil
@@ -30462,14 +30619,29 @@ function _0xa299._0xc0db()
                 
                 _0xa299._0xded8("boss_spawning", "", math.ceil(7 - spawnElapsed) .. "s")
                 
-                -- Teleport to spawn position to trigger boss spawn
-                local spawnPosition = CFrame.new(-1031.22461, 260.756836, -1631.61987)
-                hrp.CFrame = spawnPosition
-                
-                -- Try to fire spawn event
-                pcall(function()
-                    _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("activateBarbarit")
-                end)
+                -- Two different jobs here, depending on the boss.
+                local spawnEvent = _0xa299._0xHLWNBossNum("spawnEvent", nil)
+                if spawnEvent then
+                    -- SUMMONED (Barbarit, Lavarossa): go to the spawn and fire
+                    -- the activate event. A raw CFrame write is right for this
+                    -- one -- it must not yield inside the Heartbeat.
+                    local spawnPosition = _0xa299._0xHLWNBossNum("spawnPosition", nil)
+                    if spawnPosition then
+                        hrp.CFrame = spawnPosition
+                    end
+                    pcall(function()
+                        local de = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
+                        de:FireServer(spawnEvent)
+                    end)
+                else
+                    -- NOT SUMMONED (Tairock, Chakra Knight): the boss already
+                    -- exists, it is just outside our streaming radius. Firing
+                    -- an activate event would do nothing and sitting at the
+                    -- safespot would never reveal it, so walk to its arena and
+                    -- let streaming pull it in -- which is what the Boss Farm
+                    -- does. See _0xa299._0xHLWNVisitArena.
+                    _0xa299._0xHLWNVisitArena()
+                end
                 
                 -- Auto pickup Candy while waiting for boss
                 if _0xa299._0xb81e.autoPickup then
@@ -30544,26 +30716,34 @@ function _0xa299._0xc0db()
                 if not _0xa299._0xb81e.bossGripped then
                     _0xa299._0xb81e.bossGripped = true
                     _0xa299._0xb81e.lastGripPosition = bossHrp.Position
-                    _0xa299._0x8545:Notify("Farm", "Barbarit knocked, gripping", 3, "check")
+                    _0xa299._0x8545:Notify("Farm", bossLabel .. " knocked, gripping", 3, "check")
                 end
                 
                 _0xa299._0xded8("boss_gripped", boss.Name, "Gripping...")
                 return
             end
             
-            -- Animation-based dodging for Barbarit.
-            -- dangerAnimOffset matches the Boss Farm's Barbarit entry: lift
-            -- only 2 studs, not the 100 it used to, because the extra height
-            -- is what loses the boss. Change both together.
+            -- Animation-based dodging, per boss. dangerAnimOffset comes from
+            -- the Boss Farm entry for whichever boss this is - 2 studs for
+            -- Barbarit, not the 100 it used to be, because the extra height is
+            -- what loses the boss.
             local extraOffset = 0
-            local dangerAnim = "rbxassetid://9656290960" -- Same as Barbarit The Rose
-            local dangerTime = 0.5
-            local dangerAnimOffset = 2
+            -- All three read from the Boss Farm config for this boss, so a
+            -- retune there carries over. Tairock and Lavarossa have no danger
+            -- animation, and a nil id simply never matches a playing track.
+            local dangerAnim = _0xa299._0xHLWNBossNum("dangerAnim", nil)
+            -- Chakra Knight has TWO dangerous moves and the Boss Farm config
+            -- records both. Matching only the first would dodge half of them.
+            local dangerAnim2 = _0xa299._0xHLWNBossNum("secondDangerAnim", nil)
+            local dangerTime = _0xa299._0xHLWNBossNum("dangerTime", 0.5)
+            local dangerAnimOffset = _0xa299._0xHLWNBossNum("dangerAnimOffset", 2)
 
             local animator = humanoid:FindFirstChildOfClass("Animator")
             if animator then
                 for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-                    if track.Animation.AnimationId == dangerAnim then
+                    local id = track.Animation.AnimationId
+                    if (dangerAnim and id == dangerAnim)
+                       or (dangerAnim2 and id == dangerAnim2) then
                         if track.TimePosition > dangerTime and track.TimePosition < 2.7 then
                             extraOffset = dangerAnimOffset
                             break
@@ -30580,7 +30760,7 @@ function _0xa299._0xc0db()
             -- Farm's config, which is still 12.5. The two were tuned
             -- separately, so sharing the number would move the Boss Farm every
             -- time this one is adjusted.
-            local npcOffset = (_0xa299._0xHLWNBarbaritOffset or 10.5)
+            local npcOffset = _0xa299._0xHLWNBossNum("offset", 10.5)
                 - _0xa299._0xb81e.npcOffset + extraOffset
             _0xa299._0xVelSettle(hrp)
             hrp.CFrame = CFrame.new(bossHrp.Position + Vector3.new(0, npcOffset, 0), bossHrp.Position)
