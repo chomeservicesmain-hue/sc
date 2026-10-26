@@ -25296,7 +25296,8 @@ function _0xa299._0xa408()
     
     -- to game if not loaded
     if not (_0xa299._0xe08d:FindFirstChild("Loaded") and _0xa299._0xe08d.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             task.spawn(function()
                 pcall(function()
                     _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
@@ -25750,7 +25751,8 @@ function _0xa299._0x38e2()
     -- Force load into game if not loaded
     local RS = _0xa299._0xe08d
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             task.spawn(function()
                 pcall(function()
                     RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
@@ -26075,7 +26077,8 @@ function _0xa299._0x9c5b()
     -- Force load into game FIRST before anything else
     local RS = _0xa299._0xe08d
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             _0xa299._0x8545:Notify("Farm", "Force loading into game", 3, "info")
             
             task.spawn(function()
@@ -26702,7 +26705,8 @@ end
 function _0xa299._0x6da5()
     local RS = game:GetService("ReplicatedStorage")
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             task.spawn(function()
                 pcall(function()
                     RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
@@ -33100,7 +33104,8 @@ function _0xa299._0xStartAutoProg()
     
     -- Force load into game if not loaded (FIRST thing before anything else)
     if not (_0xa299._0xe08d:FindFirstChild("Loaded") and _0xa299._0xe08d.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             _0xa299._0x8545:Notify("Auto Prog", "Force loading into game", 3, "info")
             task.spawn(function()
                 pcall(function()
@@ -34881,7 +34886,8 @@ function _0xa299._0xAFKM()
         -- Force load into game if not loaded
         local RS = _0xa299._0xe08d
         if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-            if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+            if workspace.CurrentCamera
+               and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
                 _0xa299._0x8545:Notify("Farm", "AFK Age Ups, force loading into game", 3, "info")
                 
                 task.spawn(function()
@@ -35013,7 +35019,8 @@ _0xa299._0xFRFS = {
 function _0xa299._0xFRF_FORCELOAD()
     local RS = _0xa299._0xe08d
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             task.spawn(function()
                 pcall(function()
                     RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
@@ -37834,7 +37841,8 @@ function _0xa299._0xa94c()
     
     -- Force load into game if not loaded (FIRST thing before anything else)
     if not (_0xa299._0xe08d:FindFirstChild("Loaded") and _0xa299._0xe08d.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             _0xa299._0x8545:Notify("Farm", "Force loading into game", 3, "info")
             task.spawn(function()
                 pcall(function()
@@ -38141,6 +38149,82 @@ function _0xa299._0xa94c()
 
         local char = _0xa299._0x396d.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        -- CHECK: Handle not loaded in (for server hops)
+        --
+        -- This MUST stay above the hrp guard below. Until the server loads us
+        -- in we have no character at all, so while this block sat AFTER that
+        -- guard it could never run even once - the Heartbeat returned early
+        -- every frame and the retry this block exists to provide did not
+        -- actually exist. The only LoadedIn that ever went out was the single
+        -- one from the farm start path, so if that one did not take (Events not
+        -- replicated yet, or the InvokeServer erroring into its pcall) nothing
+        -- ever fired again. That is the reported "skips the loading screen but
+        -- never fires the load-in event", and why it hit only some users.
+        local RS = _0xa299._0xe08d
+        if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
+            -- Throttled to 1s. A real client sends LoadedIn ONCE; at 60 fps an
+            -- unthrottled retry is both server spam and an obvious tell.
+            if tick() - (_0xa299._0x1915.loadedInFiredAt or 0) >= 1 then
+                _0xa299._0x1915.loadedInFiredAt = tick()
+
+                -- CurrentCamera is nil for a moment on a fresh join or hop and
+                -- indexing it threw right here, the same break as reading
+                -- RS.Loaded directly: it killed the handler before it reached
+                -- either branch.
+                if workspace.CurrentCamera
+                   and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+                    task.spawn(function()
+                        pcall(function()
+                            RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
+                        end)
+                    end)
+
+                    pcall(function()
+                        RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
+                    end)
+
+                    task.wait()
+
+                    if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
+                        local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
+                        if menuScreen then menuScreen.Visible = false end
+                    end
+
+                    if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
+                        local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
+                        if menuTrack then menuTrack.Playing = false end
+                    end
+
+                    -- Gets past the v1551 loading screen first, then waits for
+                    -- the function to exist. See _0xa299._0xLoadIntoGame.
+                    _0xa299._0xLoadIntoGame()
+                else
+                    -- Loading screen still up: the camera is Scriptable here,
+                    -- NOT Custom. Tap through it first, then announce.
+                    _0xa299._0xLoadIntoGame()
+
+                    pcall(function()
+                        RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
+                    end)
+                    pcall(function()
+                        RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
+                    end)
+                end
+
+                -- Re-read the character: pinning the spawn CFrame needs an hrp
+                -- and during the window above there is none. The outer hrp is
+                -- nil here by definition, which is why this cannot use it.
+                pcall(function()
+                    local c = _0xa299._0x396d.Character
+                    local h = c and c:FindFirstChild("HumanoidRootPart")
+                    if h and type(_0xa299._0xdde4) == "function" then
+                        h.CFrame = _0xa299._0xdde4()
+                    end
+                end)
+            end
+            return -- Wait for next frame after loading in
+        end
+
         if not hrp then return end
 
         -- PANIC HP CHECK: Pause and teleport to safespot if HP is low
@@ -38309,63 +38393,6 @@ function _0xa299._0xa94c()
             _0xa299._0x1915.forcefieldRemovalStartTime = nil
             _0xa299._0x1915.forcefieldDetectedTime = nil
             _0xa299._0x1915.forcefieldRemovalActive = false
-        end
-        
-        -- CHECK: Handle not loaded in (for server hops)
-        local RS = _0xa299._0xe08d
-        if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-            if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-                task.spawn(function()
-                    pcall(function()
-                        RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                    end)
-                end)
-                
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-                end)
-                
-                task.wait()
-                
-                if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                    local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                    if menuScreen then menuScreen.Visible = false end
-                end
-                
-                if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                    local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                    if menuTrack then menuTrack.Playing = false end
-                end
-                
-                -- Gets past the v1551 loading screen first, then waits for the
-                -- function to exist. See _0xa299._0xLoadIntoGame.
-                _0xa299._0xLoadIntoGame()
-                
-                pcall(function()
-                    if type(_0xa299._0xdde4) == "function" then
-                        hrp.CFrame = _0xa299._0xdde4()
-                    end
-                end)
-            else
-                -- _0xa299._0x2f65 not custom, try alternate loading
-                -- Gets past the v1551 loading screen first, then waits for the
-                -- function to exist. See _0xa299._0xLoadIntoGame.
-                _0xa299._0xLoadIntoGame()
-                
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-                end)
-                
-                pcall(function()
-                    if type(_0xa299._0xdde4) == "function" then
-                        hrp.CFrame = _0xa299._0xdde4()
-                    end
-                end)
-            end
-            return -- Wait for next frame after loading in
         end
         
         -- CHECK: Server hop if ANY chakra sense user is in the server (serverHopIfChakraSenseUser option)
@@ -42756,7 +42783,8 @@ function _0xa299._0xDualFarmForceLoad()
     local RS = _0xa299._0xe08d
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
         _0xa299._0xDualFarmLog("ForceLoad: Not loaded, forcing load...")
-        if workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
+        if workspace.CurrentCamera
+           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
             task.spawn(function()
                 pcall(function()
                     RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
