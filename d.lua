@@ -24458,6 +24458,136 @@ function _0xa299._0xMasteryLoadIn(timeout)
     end, timeout)
 end
 
+---------------------------------------------------------------------
+-- THE ONE FORCE LOAD-IN
+--
+-- This is what a farm should call. There used to be ten hand-rolled copies of
+-- the same block, and nine of them were broken the same way (no else branch, so
+-- they did nothing at all while the loading screen was up). One function means
+-- a bug like that gets fixed once instead of nine times, and the next farm
+-- cannot reintroduce it by copying a neighbour.
+--
+-- Safe to call unconditionally at the top of a farm: already being loaded in is
+-- an immediate true with no notification and no wait, so the "are we loaded in"
+-- test that used to wrap every copy lives in here now.
+--
+--   label    notification source, e.g. "Farm" / "Auto Prog". nil stays quiet
+--            on the way in, but a FAILURE is always reported.
+--   stillOn  optional, as _0xForceLoadIn: abandon if the farm is switched off.
+--   timeout  seconds, default 30.
+--
+-- Returns true once the server has us in RS.Loaded.
+---------------------------------------------------------------------
+function _0xa299._0xFarmLoadIn(label, stillOn, timeout)
+    local RS = _0xa299._0xe08d
+    local loaded = RS:FindFirstChild("Loaded")
+    if loaded and loaded:FindFirstChild(_0xa299._0x396d.Name) then
+        return true
+    end
+
+    if label then
+        _0xa299._0x8545:Notify(label, "Force loading into game", 3, "info")
+    end
+
+    local ok = _0xa299._0xForceLoadIn(stillOn, timeout or 30)
+
+    -- Always say so when it fails, even where the start was silent. Every copy
+    -- of this failed without a word, which is the reason "the farm just never
+    -- loads me in" went unexplained for as long as it did.
+    if not ok then
+        _0xa299._0x8545:Notify(label or "Farm", "Could not load into game", 4, "error")
+    end
+    return ok
+end
+
+---------------------------------------------------------------------
+-- AUTO BANK RYO
+--
+-- Deposits ryo in 1000 chunks while a farm runs. Shared by the Boss Farm and
+-- the Halloween (Pumpkin Point) farm, called from the same spot each one does
+-- its other post-loot side-work, so it needs no thread or timer of its own.
+--
+-- Fires the game's own path exactly:
+--     Bank.Ryo.Deposit.TextBox.FocusLost
+--         -> DataFunction:InvokeServer("depositRyo", <TextBox.Text>)
+-- so the amount goes as a STRING and there is NO trailing version tag. Both
+-- verified against the client dump (ClientGui.LocalScript 27492) - do not
+-- "fix" either of them.
+--
+-- No teleport and no NPC: the game gates this on its own Bank UI, not on
+-- standing anywhere, and the server's reply is what tells us it landed.
+--
+-- THE HUD IS THE ONLY RYO READ, AND IT IS READ ONCE. The game repaints
+-- Mainframe.Ryo.Amount from inside ITS deposit handler, which our call does not
+-- go through, so after our own deposit that label is stale. Re-reading it per
+-- iteration would mean depositing against a number that never moves - the Auto
+-- Fill Treat Basket bug exactly. So the running total comes from the server's
+-- reply (it returns the updated player data, same as the game uses to repaint),
+-- and we write the label back at the end to keep the next call honest.
+---------------------------------------------------------------------
+_0xa299._0xBANKRYO = {
+    chunk     = 1000,   -- deposit this much at a time, and the trigger level
+    maxPerRun = 20,     -- hard stop, so a strange reply cannot spin in here
+    busy      = false,
+}
+
+-- Ryo on hand (not banked). HUD first, _G.Data as the fallback.
+function _0xa299._0xRyoOnHand()
+    local n
+    pcall(function()
+        local t = _0xa299._0x396d.PlayerGui.ClientGui.Mainframe.Ryo.Amount.Text
+        n = tonumber((tostring(t):gsub("%D", "")))
+    end)
+    if n then return n end
+    local data = _0xa299._0xLocalData()
+    return (data and tonumber(data.Ryo)) or 0
+end
+
+function _0xa299._0xBankRyo(enabled, label)
+    local S = _0xa299._0xBANKRYO
+    if not enabled or S.busy then return end
+
+    local have = _0xa299._0xRyoOnHand()
+    if have < S.chunk then return end
+
+    S.busy = true
+    local banked, runs = 0, 0
+
+    while have >= S.chunk and runs < S.maxPerRun do
+        runs = runs + 1
+
+        -- Kept as `df:InvokeServer(...)` on one line rather than chained off
+        -- WaitForChild: tools/audit_remote_args.py harvests `<name>:InvokeServer(`,
+        -- so a chain broken across lines makes this remote invisible to the
+        -- arity check that exists to stop us firing a banned signature.
+        local ok, pdata = pcall(function()
+            local df = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
+            return df:InvokeServer("depositRyo", tostring(S.chunk))
+        end)
+        if not ok then break end
+
+        local left = pdata and tonumber(pdata.Ryo)
+        -- No usable reply, or the balance did not go down: the server refused.
+        -- Repeating a rejected call is pointless and loud, so stop.
+        if not left or left >= have then break end
+
+        -- Credit what actually moved rather than assuming the full chunk.
+        banked = banked + (have - left)
+        have = left
+        if have >= S.chunk then task.wait(0.35) end
+    end
+
+    S.busy = false
+
+    if banked > 0 then
+        pcall(function()
+            _0xa299._0x396d.PlayerGui.ClientGui.Mainframe.Ryo.Amount.Text = tostring(have)
+        end)
+        _0xa299._0x8545:Notify(label or "Farm",
+            "Banked " .. tostring(banked) .. " ryo", 3, "check")
+    end
+end
+
 function _0xa299._0xMasteryOff()
     pcall(function()
         local t = _0xa299._0xMasteryToggle
@@ -25295,36 +25425,7 @@ function _0xa299._0xa408()
     _0xa299._0x1ea4.running = true
     
     -- to game if not loaded
-    if not (_0xa299._0xe08d:FindFirstChild("Loaded") and _0xa299._0xe08d.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            task.spawn(function()
-                pcall(function()
-                    _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-        end
-    end
+    _0xa299._0xFarmLoadIn()
     
     task.spawn(function()
         local startTime = tick()
@@ -25749,37 +25850,7 @@ function _0xa299._0x38e2()
     _0xa299._0xfd68.trackedPlayers = {}
     
     -- Force load into game if not loaded
-    local RS = _0xa299._0xe08d
-    if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            task.spawn(function()
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-        end
-    end
+    _0xa299._0xFarmLoadIn()
     
     _0xa299._0xfd68.connection = task.spawn(function()
         local startTime = tick()
@@ -26077,51 +26148,22 @@ function _0xa299._0x9c5b()
     -- Force load into game FIRST before anything else
     local RS = _0xa299._0xe08d
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            _0xa299._0x8545:Notify("Farm", "Force loading into game", 3, "info")
-            
-            task.spawn(function()
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-            
-            local hrp = _0xa299._0x396d.Character and _0xa299._0x396d.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                hrp.CFrame = _0xa299._0xdde4()
-            end
-            
-            task.wait(2)
-            
-            -- Wait for character to be ready
-            if not _0xa299._0x396d.Character then
-                _0xa299._0x396d.CharacterAdded:Wait()
-            end
-            hrp = _0xa299._0x396d.Character:WaitForChild("HumanoidRootPart", 5)
-            if hrp then
-                _0xa299._0x8545:Notify("Farm", "Force load complete", 3, "check")
-            end
+        _0xa299._0xFarmLoadIn("Farm")
+        
+        local hrp = _0xa299._0x396d.Character and _0xa299._0x396d.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            hrp.CFrame = _0xa299._0xdde4()
+        end
+        
+        task.wait(2)
+        
+        -- Wait for character to be ready
+        if not _0xa299._0x396d.Character then
+            _0xa299._0x396d.CharacterAdded:Wait()
+        end
+        hrp = _0xa299._0x396d.Character:WaitForChild("HumanoidRootPart", 5)
+        if hrp then
+            _0xa299._0x8545:Notify("Farm", "Force load complete", 3, "check")
         end
     end
     
@@ -26703,37 +26745,7 @@ end
 
 -- Force load into game function
 function _0xa299._0x6da5()
-    local RS = game:GetService("ReplicatedStorage")
-    if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            task.spawn(function()
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-        end
-    end
+    _0xa299._0xFarmLoadIn()
 end
 
 -- Main SwitchPowder Farm loop
@@ -27420,6 +27432,7 @@ _0xa299._0xb81e = {
     avoidBossList = {},        -- base names picked in "Avoid Killing"; skipped
     barbDodgeUntil = 0,        -- hold the Barbarian leap dodge until this tick
     autoSellGems = false,
+    autoBankRyo = false,       -- see _0xa299._0xBankRyo
     -- Pumpkin Point scan sweep (see _0xa299._0xHLWNScanStep)
     scanIndex = 0,
     scanUntil = 0,
@@ -27520,6 +27533,196 @@ function _0xa299._0xHLWNScanReset()
     S.scanUntil = 0
     S.scanExhausted = false
     S.scanRetryAt = 0
+    -- A fresh sweep also means re-checking the mission board: boards re-roll,
+    -- so "not offering Corrupted Point" is never a permanent answer.
+    if _0xa299._0xHLWNCP then _0xa299._0xHLWNCP.unavailableUntil = 0 end
+end
+
+---------------------------------------------------------------------
+-- CORRUPTED POINT METHOD  (Pumpkin Point fallback)
+--
+-- When the sweep finds no farmable point anywhere, spawn one instead of
+-- leaving. The Corrupted Point mission spawns a point at its marker, and
+-- DataEvent:FireServer("Menu") drops us back to the menu WITHOUT handing the
+-- mission in -- so the point it spawned stays in the world and the board will
+-- offer the mission again. That is the whole trick: an endless supply of points
+-- out of one repeatable quest, because we never actually complete it.
+--
+-- The cycle, in the order the game requires:
+--   1. Already on a mission? -> "Menu", then load back in. The server hands out
+--      only one mission at a time (see _0xTakeMission), so an ongoing one has
+--      to be shed first or the board click is refused. Skipped entirely when
+--      there is no ongoing mission -- then we just take it.
+--   2. Take "Corrupted Point" off our own village's board.
+--   3. Travel to the mission marker. Arriving is what spawns the point.
+--   4. REMEMBER where the point is, before step 5 streams it out.
+--   5. "Menu" again and load back in. This is the part that makes it repeat.
+--   6. Travel back to the remembered spot and let the farm have it.
+--
+-- Runs in its own thread: it yields for two menu round trips, two load-ins and
+-- two streaming travels. The farm's Heartbeat stands off for the whole run on
+-- _0xHLWNCP.busy, because that loop re-pins us to the safespot every frame and
+-- would otherwise drag us off mid-cycle -- the same fight that broke Auto Fill
+-- Treat Baskets.
+--
+-- Travel is _0xSTP everywhere, never a raw CFrame write: the board, the marker
+-- and the point we come back to are all usually in unstreamed regions, and
+-- arriving in one without a stream request drops us through the floor.
+---------------------------------------------------------------------
+_0xa299._0xHLWNCPName    = "Corrupted Point"
+_0xa299._0xHLWNCPRecheck = 90   -- seconds before trying a re-rolled board again
+
+_0xa299._0xHLWNCP = {
+    enabled          = false,
+    busy             = false,   -- a cycle is live; the Heartbeat must stand off
+    unavailableUntil = 0,       -- board was not offering it; recheck after this
+    cycles           = 0,
+}
+
+-- Back to the menu. One argument, no version tag -- this is the client's own
+-- shape, captured live. It is NOT in our on-disk client dump (the send lives in
+-- a GUI script we have not dumped, the same way ServerTeleport hides in the
+-- ServerList Handler), so audit_remote_args.py lists it as not comparable
+-- rather than verifying it. Do not add a trailing tag on the assumption that
+-- every remote has one: EndBlock does not either.
+function _0xa299._0xHLWNToMenu()
+    return pcall(function()
+        local de = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
+        de:FireServer("Menu")
+    end)
+end
+
+function _0xa299._0xHLWNCPHrp()
+    local c = _0xa299._0x396d.Character
+    return (c and c:FindFirstChild("HumanoidRootPart")) or nil
+end
+
+-- A menu round trip respawns us, so the character we had is gone. Wait for the
+-- new one rather than writing a CFrame onto a stale part.
+function _0xa299._0xHLWNCPWaitChar(timeout)
+    local deadline = tick() + (timeout or 10)
+    while not _0xa299._0xHLWNCPHrp() and tick() < deadline do
+        task.wait(0.2)
+    end
+    return _0xa299._0xHLWNCPHrp() ~= nil
+end
+
+function _0xa299._0xHLWNCPCycle()
+    local S = _0xa299._0xHLWNCP
+    if S.busy then return false end
+    S.busy = true
+
+    local function stop(msg, boardEmpty)
+        if boardEmpty then
+            S.unavailableUntil = tick() + (_0xa299._0xHLWNCPRecheck or 90)
+        end
+        if msg then
+            _0xa299._0x8545:Notify("Farm", "Corrupted Point method: " .. msg, 3, "warning")
+        end
+        S.busy = false
+        return false
+    end
+
+    local function menuAndBack()
+        _0xa299._0xHLWNToMenu()
+
+        -- Wait until the server has actually taken us out before asking to be
+        -- let back in. _0xFarmLoadIn returns true on the spot while RS.Loaded
+        -- still lists us, so calling it too early skips the load-in entirely
+        -- and leaves us parked on the menu with no character -- which then
+        -- surfaces as the misleading "no character after the menu".
+        -- Bounded, so this still works if "Menu" turns out not to unload us.
+        local RS = _0xa299._0xe08d
+        local outBy = tick() + 8
+        while tick() < outBy do
+            local loaded = RS:FindFirstChild("Loaded")
+            if not (loaded and loaded:FindFirstChild(_0xa299._0x396d.Name)) then break end
+            task.wait(0.2)
+        end
+
+        if not _0xa299._0xFarmLoadIn("Farm", function()
+            return _0xa299._0xb81e.enabled
+        end, 30) then
+            return false, "could not load back in"
+        end
+        if not _0xa299._0xHLWNCPWaitChar(10) then
+            return false, "no character after the menu"
+        end
+        task.wait(1)
+        return true
+    end
+
+    -- 1. Shed an ongoing mission, and ONLY then. With no mission in progress
+    --    the menu trip would be pointless downtime.
+    if _0xa299._0xActiveMission() then
+        local ok, why = menuAndBack()
+        if not ok then return stop(why) end
+    end
+    if not _0xa299._0xb81e.enabled then return stop(nil) end
+
+    -- 2. Take it off our own village's board.
+    local team = _0xa299._0x396d.Team and _0xa299._0x396d.Team.Name or nil
+    if not team then return stop("could not read your team") end
+
+    local board, boardCF = _0xa299._0xMissionBoard(team)
+    if not (board and boardCF) then return stop("mission board did not load") end
+
+    _0xa299._0xSTP(boardCF * CFrame.new(0, 0, 3))
+    task.wait(0.5)
+
+    local took, why = _0xa299._0xTakeMission(board, _0xa299._0xHLWNCPName)
+    if not took then
+        -- "not offered on this board" is the one the caller has to know about:
+        -- the board has re-rolled away from Corrupted Point, so there is
+        -- nothing to spawn and hopping becomes the only move left. Any other
+        -- failure is transient and must NOT start a hop.
+        return stop(tostring(why), _0xa299._0xMissionUnavailable ~= nil)
+    end
+
+    -- 3. Arriving at the marker is what spawns the point.
+    local markerCF = _0xa299._0xMissionMarker()
+    if not markerCF then return stop("no mission marker appeared") end
+    _0xa299._0xSTP(markerCF)
+    task.wait(1.5)
+
+    -- 4. Remember it. Matched on every seasonal variant, with the "Corrupted"
+    --    substring as a backstop for a reskin we have not catalogued -- the
+    --    same pair of tests the Corrupted Point quest uses.
+    local pointCF
+    local findDeadline = tick() + 8
+    repeat
+        local me = _0xa299._0xHLWNCPHrp()
+        local myPos = me and me.Position
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if _0xa299._0xIsEventName(obj.Name, "CorruptedPoint")
+               or string.find(obj.Name, "Corrupted") then
+                local part = obj:IsA("BasePart") and obj
+                    or (obj:IsA("Model")
+                        and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")))
+                if part and (not myPos or (part.Position - myPos).Magnitude <= 120) then
+                    pointCF = part.CFrame
+                    break
+                end
+            end
+        end
+        if not pointCF then task.wait(0.25) end
+    until pointCF or tick() > findDeadline
+
+    if not pointCF then return stop("point did not spawn at the marker") end
+
+    -- 5. Menu again, WITHOUT handing the mission in. The point stays.
+    local ok2, why2 = menuAndBack()
+    if not ok2 then return stop(why2) end
+    if not _0xa299._0xb81e.enabled then return stop(nil) end
+
+    -- 6. Back to it, and hand over to the farm's normal point handling.
+    _0xa299._0xSTP(pointCF)
+    S.cycles = S.cycles + 1
+    _0xa299._0xHLWNScanReset()
+    _0xa299._0x8545:Notify("Farm",
+        "Spawned a Corrupted Point (cycle " .. tostring(S.cycles) .. ")", 3, "check")
+    S.busy = false
+    return true
 end
 
 ---------------------------------------------------------------------
@@ -27572,6 +27775,13 @@ end
 _0xa299._0xHLWNBossFarmKeys = {
     ["Barbarit The Rose"] = { key = "Barbarit The Rose", fallback = 12.5 },
     ["Tairock"]           = { key = "Tairock",           fallback = 8 },
+    -- These two were missing, so they fell through to the mob default of -8.5
+    -- and got farmed from BELOW. They are bosses: hover above them, with the
+    -- Boss Farm's own number. Note the config key is "Lava Rosa" while the
+    -- workspace model, and the base name _0xEventBase resolves to, is
+    -- "Lavarossa".
+    ["Lavarossa"]         = { key = "Lava Rosa",         fallback = 11 },
+    ["Chakra Knight"]     = { key = "Chakra Knight",     fallback = 12 },
 }
 
 function _0xa299._0xHLWNBossFarmOffset(base)
@@ -27713,11 +27923,29 @@ function _0xa299._0xHLWNCratosSpinning(npc)
 end
 
 -- Takes the NPC MODEL, not its name: the Cratos dodge has to read its animator.
+--
+-- THE SLIDER IS SIGN-AWARE. Mobs are farmed from BELOW (negative offset) and
+-- bosses from ABOVE (positive), so the npcOffset slider cannot just be added to
+-- both. Someone who nudges the slider until it sits perfectly on the mobs has
+-- tuned "move me towards the NPC"; adding that same value to a boss offset
+-- moves them the opposite way, further off the boss. So on anything farmed from
+-- above the slider is SUBTRACTED, which makes one slider setting mean the same
+-- thing on every target.
+--
+-- The sign of the base offset is what decides this, rather than a hand-kept
+-- list of bosses: the sign IS whether we hover above or below. That also means
+-- a boss offset retuned in the Boss Farm config keeps the right behaviour here
+-- for free, even if its sign changes.
 function _0xa299._0xHLWNNpcOffset(npc)
     local name = ""
     pcall(function() name = (npc and npc.Name) or "" end)
     local base = _0xa299._0xEventBase(name)
     local slider = _0xa299._0xb81e.npcOffset or 0
+
+    local function tune(baseOffset)
+        if baseOffset > 0 then return baseOffset - slider end      -- from above
+        return baseOffset + slider                                 -- from below
+    end
 
     if base == "The Barbarian" then
         -- Dodge its leap, and stay up for a beat after the slam lands.
@@ -27727,26 +27955,28 @@ function _0xa299._0xHLWNNpcOffset(npc)
                 tick() + (_0xa299._0xHLWNBarbDodgeHold or 1)
         end
         if tick() < (_0xa299._0xb81e.barbDodgeUntil or 0) then
-            return (_0xa299._0xHLWNBarbDodgeOffset or 20) + slider
+            return tune(_0xa299._0xHLWNBarbDodgeOffset or 20)
         end
-        return 9 + slider                                          -- Boss Mission: 9
+        return tune(9)                                             -- Boss Mission: 9
     end
 
     -- Bosses the Boss Farm has its own tuned offset for: read it from that
     -- config rather than duplicating the number, so the two cannot drift apart
     -- if it is ever retuned. The fallback is today's value.
     local fromBossFarm = _0xa299._0xHLWNBossFarmOffset(base)
-    if fromBossFarm then return fromBossFarm + slider end
+    if fromBossFarm then return tune(fromBossFarm) end
 
     if base == "Cratos" then
-        local off = -7 + slider                                    -- quest base
+        local off = tune(-7)                                       -- quest base
         if _0xa299._0xHLWNCratosSpinning(npc) then
+            -- Dodge is a further push in the same direction we already hover,
+            -- so it is not slider-tuned.
             off = off + (_0xa299._0xHLWNCratosDodge or -10)
         end
         return off
     end
 
-    return -8.5 + slider
+    return tune(-8.5)
 end
 
 ---------------------------------------------------------------------
@@ -28734,6 +28964,11 @@ function _0xa299._0xc0db()
         -- NPCs. It moves the character, and this loop re-pins every frame, so
         -- without this they fight and neither works.
         if _0xa299._0xTBSK and _0xa299._0xTBSK.busy then return end
+
+        -- Same standoff for the Corrupted Point cycle: it walks us to a board,
+        -- a marker and back through the menu, and this loop re-pins to the
+        -- safespot every frame.
+        if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then return end
         
         local char = _0xa299._0x396d.Character
         if not char then return end
@@ -28937,7 +29172,16 @@ function _0xa299._0xc0db()
                 _0xa299._0xb81e.lastPointPosition = nil
                 table.clear(_0xa299._0xb81e.lootPickupTable)
                 _0xa299._0x8545:Notify("Farm", "Loot collected, moving to next point", 2, "check")
-                
+
+                -- Auto Bank Ryo. Spawned: the deposit is an InvokeServer and
+                -- would otherwise hold the farm loop until the server answers.
+                -- Its own busy latch stops these overlapping.
+                if _0xa299._0xb81e.autoBankRyo then
+                    task.spawn(function()
+                        _0xa299._0xBankRyo(_0xa299._0xb81e.autoBankRyo, "Farm")
+                    end)
+                end
+
                 -- Auto Sell Gems after loot collection
                 if _0xa299._0xb81e.autoSellGems then
                     task.spawn(function()
@@ -29060,6 +29304,20 @@ function _0xa299._0xc0db()
 
                 -- Teleport to safespot while searching
                 hrp.CFrame = _0xa299._0xdde4()
+
+                -- Nothing on the map. Before giving up on this server, spawn a
+                -- point from the Corrupted Point mission instead -- see
+                -- _0xa299._0xHLWNCPCycle. Returning here is what holds the hop
+                -- below off: we only fall through to it once a cycle has
+                -- reported the board is not offering the mission, which is
+                -- exactly the "no pumpkin points AND no corrupted points"
+                -- condition.
+                if _0xa299._0xHLWNCP.enabled
+                   and not _0xa299._0xHLWNCP.busy
+                   and tick() >= (_0xa299._0xHLWNCP.unavailableUntil or 0) then
+                    task.spawn(_0xa299._0xHLWNCPCycle)
+                    return
+                end
 
                 -- Sweep found nothing anywhere, so the server really is empty.
                 -- With hopping off, show the countdown to the next sweep.
@@ -29616,8 +29874,12 @@ function _0xa299._0xc0db()
                 end
             end
             
-            -- Reset velocity and teleport ABOVE the boss (using NPC offset + dodge offset)
-            local npcOffset = 12.5 + _0xa299._0xb81e.npcOffset + extraOffset
+            -- Reset velocity and teleport ABOVE the boss (using NPC offset + dodge offset).
+            -- Farmed from above, so the slider is SUBTRACTED - see the notes on
+            -- _0xHLWNNpcOffset. The base number is read from the Boss Farm
+            -- config instead of being repeated here.
+            local npcOffset = (_0xa299._0xHLWNBossFarmOffset("Barbarit The Rose") or 12.5)
+                - _0xa299._0xb81e.npcOffset + extraOffset
             _0xa299._0xVelSettle(hrp)
             hrp.CFrame = CFrame.new(bossHrp.Position + Vector3.new(0, npcOffset, 0), bossHrp.Position)
         end
@@ -29627,6 +29889,10 @@ end
 function _0xa299._0xefc6()
     _0xa299._0xb81e.enabled = false
     _0xa299._0xHLWNScanReset()
+    -- Drop the Corrupted Point latch, or a cycle interrupted by the farm being
+    -- switched off would leave the Heartbeat standing off for good next time.
+    _0xa299._0xHLWNCP.busy = false
+    _0xa299._0xHLWNCP.unavailableUntil = 0
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
     _0xa299._0xb81e.isRecoveringHP = false
@@ -29893,7 +30159,22 @@ _0xa299._0xHLWN:AddToggle("Halloween Auto Sell Gems", false, function(Value)
     _0xa299._0xb81e.autoSellGems = Value
 end)
 
+-- Text differs from the Boss Farm's on purpose: Library.Options is keyed by
+-- element text, so two toggles sharing one would cross in the save manager.
+_0xa299._0xHLWN:AddToggle("Halloween Auto Bank Ryo", false, function(Value)
+    _0xa299._0xb81e.autoBankRyo = Value
+end, {Flag = "HLWNAutoBankRyo", Type = "info",
+      Text = "banks your ryo in 1000s while farming"})
+
 _0xa299._0xHLWN:AddDivider()
+
+-- Sits directly above the hop toggle because the two interact: with this on,
+-- the farm only hops once the board has stopped offering the mission too.
+_0xa299._0xHLWN:AddToggle("Corrupted Point Method If None", false, function(Value)
+    _0xa299._0xHLWNCP.enabled = Value
+    if Value then _0xa299._0xHLWNCP.unavailableUntil = 0 end
+end, {Flag = "HLWNCPMethod", Type = "info",
+      Text = "spawns a point from the quest when none are up"})
 
 _0xa299._0xHLWN:AddToggle("Halloween Hop if None", false, function(Value)
     _0xa299._0xb81e.serverHopIfNone = Value
@@ -33103,37 +33384,7 @@ function _0xa299._0xStartAutoProg()
     end
     
     -- Force load into game if not loaded (FIRST thing before anything else)
-    if not (_0xa299._0xe08d:FindFirstChild("Loaded") and _0xa299._0xe08d.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            _0xa299._0x8545:Notify("Auto Prog", "Force loading into game", 3, "info")
-            task.spawn(function()
-                pcall(function()
-                    _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-        end
-    end
+    _0xa299._0xFarmLoadIn("Auto Prog")
     
     -- Fresh run, fresh per-run state. _0x62f5 is the quest ABORT flag and
     -- _0xStopAutoProg sets it true on the way out, so without clearing it here
@@ -34884,40 +35135,7 @@ function _0xa299._0xAFKM()
     
     _0xa299._0xAFKS.connection = task.spawn(function()
         -- Force load into game if not loaded
-        local RS = _0xa299._0xe08d
-        if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-            if workspace.CurrentCamera
-               and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-                _0xa299._0x8545:Notify("Farm", "AFK Age Ups, force loading into game", 3, "info")
-                
-                task.spawn(function()
-                    pcall(function()
-                        RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                    end)
-                end)
-                
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-                end)
-                
-                task.wait()
-                
-                if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                    local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                    if menuScreen then menuScreen.Visible = false end
-                end
-                
-                if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                    local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                    if menuTrack then menuTrack.Playing = false end
-                end
-                
-                -- Gets past the v1551 loading screen first, then waits for the
-                -- function to exist. See _0xa299._0xLoadIntoGame.
-                _0xa299._0xLoadIntoGame()
-                
-            end
-        end
+        _0xa299._0xFarmLoadIn("Farm")
         
         -- Initial teleport to safespot
         local char = _0xa299._0x396d.Character or _0xa299._0x396d.CharacterAdded:Wait()
@@ -35017,37 +35235,7 @@ _0xa299._0xFRFS = {
 }
 
 function _0xa299._0xFRF_FORCELOAD()
-    local RS = _0xa299._0xe08d
-    if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            task.spawn(function()
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-        end
-    end
+    _0xa299._0xFarmLoadIn()
 end
 
 -- Boss reward positions to avoid (within 130 studs)
@@ -35364,6 +35552,7 @@ _0xa299._0x1915 = {
     observedStartTime = nil,
     autoSellGems = false,
     autoSellTrinkets = false,
+    autoBankRyo = false,       -- see _0xa299._0xBankRyo
     autoSealTailedBeast = false,
     connection = nil,
     playerNearby = false,
@@ -37840,37 +38029,7 @@ function _0xa299._0xa94c()
     end
     
     -- Force load into game if not loaded (FIRST thing before anything else)
-    if not (_0xa299._0xe08d:FindFirstChild("Loaded") and _0xa299._0xe08d.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            _0xa299._0x8545:Notify("Farm", "Force loading into game", 3, "info")
-            task.spawn(function()
-                pcall(function()
-                    _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-        end
-    end
+    _0xa299._0xFarmLoadIn("Farm")
     
     -- Check and equip weapon before starting
     if not _0xa299._0x1c3b() then
@@ -39233,6 +39392,15 @@ function _0xa299._0xa94c()
                         lootdropwait:Disconnect()
                     end
                     
+                    -- Auto Bank Ryo. Spawned: the deposit is an InvokeServer
+                    -- and would otherwise hold the farm loop until the server
+                    -- answers. Its own busy latch stops these overlapping.
+                    if _0xa299._0x1915.autoBankRyo then
+                        task.spawn(function()
+                            _0xa299._0xBankRyo(_0xa299._0x1915.autoBankRyo, "Farm")
+                        end)
+                    end
+
                     -- Auto Sell Gems after loot collection
                     local gemSellDone = not _0xa299._0x1915.autoSellGems
                     local trinketSellDone = not _0xa299._0x1915.autoSellTrinkets
@@ -40586,6 +40754,11 @@ end)
 _0xa299._0xf02e:AddToggle("Auto Sell Trinkets", false, function(Value)
     _0xa299._0x1915.autoSellTrinkets = Value
 end)
+
+_0xa299._0xf02e:AddToggle("Auto Bank Ryo", false, function(Value)
+    _0xa299._0x1915.autoBankRyo = Value
+end, {Flag = "AutoBankRyo", Type = "info",
+      Text = "banks your ryo in 1000s while farming"})
 
 _0xa299._0xf02e:AddToggle("Auto Infuse Weapons", false, function(Value)
     _0xa299._0x1915.autoInfuseWeapons = Value
@@ -42782,36 +42955,8 @@ function _0xa299._0xDualFarmForceLoad()
     _0xa299._0xDualFarmLog("ForceLoad: Checking if need to load...")
     local RS = _0xa299._0xe08d
     if not (RS:FindFirstChild("Loaded") and RS.Loaded:FindFirstChild(_0xa299._0x396d.Name)) then
-        _0xa299._0xDualFarmLog("ForceLoad: Not loaded, forcing load...")
-        if workspace.CurrentCamera
-           and workspace.CurrentCamera.CameraType == Enum.CameraType.Custom then
-            task.spawn(function()
-                pcall(function()
-                    RS:WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer("LoadedIn")
-                end)
-            end)
-            
-            pcall(function()
-                RS:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("LoadedIn")
-            end)
-            
-            task.wait()
-            
-            if _0xa299._0x396d.PlayerGui and _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui") then
-                local menuScreen = _0xa299._0x396d.PlayerGui.ClientGui:FindFirstChild("MenuScreen")
-                if menuScreen then menuScreen.Visible = false end
-            end
-            
-            if _0xa299._0x396d:FindFirstChild("SoundPlaylist") then
-                local menuTrack = _0xa299._0x396d.SoundPlaylist:FindFirstChild("MenuTrack")
-                if menuTrack then menuTrack.Playing = false end
-            end
-            
-            -- Gets past the v1551 loading screen first, then waits for the
-            -- function to exist. See _0xa299._0xLoadIntoGame.
-            _0xa299._0xLoadIntoGame()
-            _0xa299._0xDualFarmLog("ForceLoad: Load complete")
-        end
+        _0xa299._0xFarmLoadIn()
+        _0xa299._0xDualFarmLog("ForceLoad: Load complete")
     else
         _0xa299._0xDualFarmLog("ForceLoad: Already loaded")
     end
