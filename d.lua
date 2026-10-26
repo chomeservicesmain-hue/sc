@@ -28120,6 +28120,13 @@ end
 
 -- Bosses whose hover height the Boss Farm already tunes, keyed by the base name
 -- _0xEventBase resolves to. Value is the fallback if that config cannot be read.
+-- Hover height for the Halloween Barbarit METHOD, above the boss.
+--
+-- Its own number on purpose: the Boss Farm's Barbarit config is still 12.5 and
+-- is not read here, so retuning one does not move the other. The dodge
+-- (dangerAnimOffset, +2) and the NPC offset slider still apply on top.
+_0xa299._0xHLWNBarbaritOffset = 10.5
+
 _0xa299._0xHLWNBossFarmKeys = {
     ["Barbarit The Rose"] = { key = "Barbarit The Rose", fallback = 12.5 },
     ["Tairock"]           = { key = "Tairock",           fallback = 8 },
@@ -30567,9 +30574,13 @@ function _0xa299._0xc0db()
             
             -- Reset velocity and teleport ABOVE the boss (using NPC offset + dodge offset).
             -- Farmed from above, so the slider is SUBTRACTED - see the notes on
-            -- _0xHLWNNpcOffset. The base number is read from the Boss Farm
-            -- config instead of being repeated here.
-            local npcOffset = (_0xa299._0xHLWNBossFarmOffset("Barbarit The Rose") or 12.5)
+            -- _0xHLWNNpcOffset.
+            --
+            -- This method has its OWN height rather than reading the Boss
+            -- Farm's config, which is still 12.5. The two were tuned
+            -- separately, so sharing the number would move the Boss Farm every
+            -- time this one is adjusted.
+            local npcOffset = (_0xa299._0xHLWNBarbaritOffset or 10.5)
                 - _0xa299._0xb81e.npcOffset + extraOffset
             _0xa299._0xVelSettle(hrp)
             hrp.CFrame = CFrame.new(bossHrp.Position + Vector3.new(0, npcOffset, 0), bossHrp.Position)
