@@ -20971,6 +20971,10 @@ end
 _0xa299._0xdee0 = nil
 _0xa299._0xdbc5 = 0
 
+-- Seconds a chosen safespot is kept before main is reconsidered. The spot is
+-- still re-checked for players every frame; this only stops it flip-flopping.
+_0xa299._0xSafeStick = 10
+
 function _0xa299._0xdde4(skipPlayerCheck)
     local success, result = pcall(function()
         -- If Spoof Loading In is enabled, always use that position
@@ -20985,23 +20989,36 @@ function _0xa299._0xdde4(skipPlayerCheck)
             return CFrame.new(mainSafespot)
         end
         
-        -- Check if players are near main safespot
-        local playersNearMain, nearPlayerName, nearDistance = _0xa299._0x258c(mainSafespot, 100)
-        
-        if not playersNearMain then
-            -- Main safespot is clear, reset cache and use it
-            _0xa299._0xdee0 = nil
-            _0xa299._0xdbc5 = 0
-            return CFrame.new(mainSafespot)
-        end
-        
-        -- Players near main safespot - check if we have a valid cached backup
-        if _0xa299._0xdee0 and (tick() - _0xa299._0xdbc5) < 10 then
-            -- Check if cached spot is still safe
+        -- STICKY. This is called EVERY FRAME by the farms' hide, which writes
+        -- the result straight onto the character, so the answer has to be
+        -- stable or the character gets dragged between spots.
+        --
+        -- It used to re-decide from scratch each frame and cache only BACKUPS.
+        -- So a player hovering near the main safespot's 100-stud edge flipped
+        -- playersNearMain on and off, the answer alternated between main and a
+        -- backup, and the farm teleported back and forth between the two for as
+        -- long as they stood there. That is the two-spot ping-pong.
+        --
+        -- Now whatever spot is in use is kept while it stays clear, main
+        -- included, and main is only reconsidered once the window expires.
+        -- Safety is unchanged: the cached spot is re-checked for players every
+        -- frame, so someone walking up to it still moves us.
+        if _0xa299._0xdee0 and (tick() - _0xa299._0xdbc5) < (_0xa299._0xSafeStick or 10) then
             if not _0xa299._0x258c(_0xa299._0xdee0.Position, 100) then
                 return _0xa299._0xdee0
             end
-            -- Cached spot now has players, need to find new one
+            -- Current spot now has players, so fall through and re-pick.
+        end
+
+        -- Check if players are near main safespot
+        local playersNearMain, nearPlayerName, nearDistance = _0xa299._0x258c(mainSafespot, 100)
+
+        if not playersNearMain then
+            -- Main is clear. Cached like any other choice, so a flicker at its
+            -- own edge cannot move us until the window is up.
+            _0xa299._0xdee0 = CFrame.new(mainSafespot)
+            _0xa299._0xdbc5 = tick()
+            return _0xa299._0xdee0
         end
         
         -- Notify (only once per 5 seconds to avoid spam)
@@ -27458,6 +27475,9 @@ _0xa299._0xb81e = {
     infiniteM1 = false,
     autoPickup = true,
     autoWeaponEquip = true,
+    autoEatFruit = false,      -- see _0xa299._0xHLWNEatFruit
+    isEatingFruit = false,     -- the farm stands off while this is set
+    fruitConnection = nil,
     serverHopIfNone = false,
     serverHopIfObserved = false,
     serverHopIfPlayerDetected = false,
@@ -27904,13 +27924,50 @@ end
 -- Chakra sense is tested the way the boss farm tests it, `_0x6378 and _0x2008`,
 -- so a stale observed flag with the notifier off cannot pin this.
 ---------------------------------------------------------------------
+-- AM I ACTUALLY BEING WATCHED?
+--
+-- _0x6378 is NOT a trustworthy answer on its own, because it has TWO
+-- unrelated writers:
+--
+--   * the chakra-sense notifier, from _0x7eaf (casting) and
+--     _0xHoveringUsers (equipped)
+--   * the LINE OF SIGHT feature, which sets it at 22712 whenever any player
+--     can simply see you -- nothing to do with chakra sense
+--
+-- That is why the top bar could read CLEAR while the farm insisted it was
+-- observed: the bar looks at the two chakra tables (22254), the farm looked
+-- at the flag, and LOS had set the flag.
+--
+-- Worse, LOS's own clear path (22725) runs only inside its heartbeat, which
+-- returns early unless lineOfSight is on AND _0xLOSIsFarming() is true. Turn
+-- LOS off while it had something in view and the flag is never cleared by
+-- anyone -- stuck true for the rest of the session with both chakra tables
+-- empty.
+--
+-- So ask the sources instead. Cheap: no raycast here, LOS's own heartbeat
+-- already does that and maintains the flag while it is running, so the flag
+-- is honoured ONLY while that feature is actually on.
+---------------------------------------------------------------------
+function _0xa299._0xHLWNWatched()
+    if next(_0xa299._0x7eaf or {}) ~= nil then return true end
+    if next(_0xa299._0xHoveringUsers or {}) ~= nil then return true end
+    if _0xa299._0xdede and _0xa299._0xdede.lineOfSight then
+        return _0xa299._0x6378 and true or false
+    end
+    return false
+end
+
+---------------------------------------------------------------------
 -- Shared "we should not be standing out in the open right now" test. Used by
 -- both things that walk the character somewhere exposed: the Corrupted Point
 -- cycle and the boss arena visit.
 function _0xa299._0xHLWNUnsafe()
     local B = _0xa299._0xb81e
     if not B.enabled then return "farm stopped" end
-    if _0xa299._0x6378 and _0xa299._0x2008 then return "chakra sense" end
+    -- _0xHLWNWatched, not the raw flag: _0x6378 is also written by Line of
+    -- Sight and can be left stuck true, which would otherwise block the
+    -- Corrupted Point method and the arena trips for the whole session.
+    if _0xa299._0xHLWNWatched() then return "chakra sense" end
     if B.hiding then return "chakra sense" end
     if B.playerHiding then return "player nearby" end
     if B.isRecoveringHP then return "low HP" end
@@ -28257,6 +28314,199 @@ end
 -- farm's Heartbeat: without it every frame would start another trip. The
 -- revisit window then stops it walking to the same arena over and over.
 ---------------------------------------------------------------------
+-- =====================================================================
+-- AUTO EAT LIFEFRUITS -- COMMENTED OUT, PENDING VERIFICATION
+--
+-- Held back because one value cannot be checked from the on-disk dump:
+-- Consumed's third argument for this item is the LENGTH of its "Eating2"
+-- animation (the item has no ActionTime), and an animation length is only
+-- readable from a live game. The code measures it the same way the client
+-- does -- GameManager:getAnimation then track.Length, client 14502-14504 --
+-- but that has not been run against a real character yet, and a wrong
+-- trailing argument on a remote is exactly what has got this script banned
+-- before.
+--
+-- TO RE-ENABLE: uncomment this block and the toggle further down (search
+-- "AUTO EAT LIFEFRUITS"). Everything else it needs -- the state fields and
+-- the two stand-off checks -- is already in place and inert, because
+-- isEatingFruit simply never gets set while this is off.
+--
+-- TO VERIFY FIRST: with the bridge up and a Life Up Fruit in the bag, check
+-- that GameManager:getAnimation("Eating2", humanoid) returns a track and
+-- what its .Length is. If that works, this is safe to turn on.
+-- =====================================================================
+-- ---------------------------------------------------------------------
+-- -- AUTO EAT LIFE UP FRUIT
+-- --
+-- -- Eats a Life Up Fruit when LifeForce drops below the threshold and one is
+-- -- actually in the bag. The farm pauses while eating and resumes after, the way
+-- -- the Boss Farm's auto-ramen uses its isEatingRamen flag.
+-- --
+-- -- THE REMOTE SHAPE IS READ OFF THE CLIENT, not guessed, because Consumed's
+-- -- third argument is not a constant (ClientGui.LocalScript 14490-14516):
+-- --
+-- --     v705 = if Items[sel].ActionTime then Items[sel].ActionTime else _v.Length
+-- --
+-- -- where _v is GameManager:getAnimation(Items[sel].Animation, Humanoid), played
+-- -- first. Life Up Fruit has NO ActionTime and Animation = "Eating2", so the
+-- -- value is that animation's LENGTH and has to be measured. The ramen path gets
+-- -- away with a hardcoded 1 only because Slurping1 happens to be exactly 1.0.
+-- --
+-- -- So this calls the game's own getAnimation and plays it, which is the same
+-- -- code path the client takes - the only way to be sure the number matches what
+-- -- a real client would send.
+-- --
+-- -- LifeForce / MaxLifeForce are read the way the Lifeforce Kick protection
+-- -- reads them, including the LifeForceMax spelling the server sometimes uses.
+-- ---------------------------------------------------------------------
+-- Seconds of hiding before the farm stops trusting the observed flag and
+-- checks whether anyone is ACTUALLY sensing. See the note at the hide.
+_0xa299._0xHLWNHideGrace = 20
+
+_0xa299._0xHLWNFruitName = "Life Up Fruit"
+-- _0xa299._0xHLWNFruitPct  = 80   -- eat below this percent of max LifeForce
+--
+-- -- Percent of max LifeForce, or nil when it cannot be read. Local data first
+-- -- since it is ~0.003ms against GetData's ~325ms, server only as a fallback.
+-- function _0xa299._0xHLWNLifeForcePct()
+--     local function pct(data)
+--         if type(data) ~= "table" then return nil end
+--         local cur = tonumber(data["LifeForce"])
+--         local max = tonumber(data["MaxLifeForce"]) or tonumber(data["LifeForceMax"])
+--         if not cur then return nil end
+--         if max and max > 0 then return (cur / max) * 100 end
+--         return nil   -- no max: a raw value is not a percentage, so do not guess
+--     end
+--
+--     local p = pct(_0xa299._0xLocalData())
+--     if p then return p end
+--
+--     local ok, data = pcall(function()
+--         local df = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
+--         return df:InvokeServer("GetData")
+--     end)
+--     return ok and pct(data) or nil
+-- end
+--
+-- -- Is there one in the bag? Local data first, same reasoning.
+-- function _0xa299._0xHLWNHasFruit()
+--     local function has(data)
+--         if type(data) ~= "table" then return false end
+--         for _, cont in pairs({ data.Inventory, data.Loadout }) do
+--             if type(cont) == "table" then
+--                 for _, e in pairs(cont) do
+--                     if type(e) == "table" and e.Item == _0xa299._0xHLWNFruitName then
+--                         return true
+--                     end
+--                 end
+--             end
+--         end
+--         return false
+--     end
+--
+--     if has(_0xa299._0xLocalData()) then return true end
+--
+--     local ok, data = pcall(function()
+--         local df = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
+--         return df:InvokeServer("GetData")
+--     end)
+--     return ok and has(data) or false
+-- end
+--
+-- -- Driver. Its own slow loop rather than the Heartbeat: the whole thing yields
+-- -- for the eat animation, and once a second is plenty for a health check.
+-- function _0xa299._0xHLWNFruitRun()
+--     _0xa299._0xb81e.fruitConnection = task.spawn(function()
+--         while _0xa299._0xb81e.autoEatFruit do
+--             task.wait(1)
+--             if not _0xa299._0xb81e.enabled then continue end
+--             if _0xa299._0xb81e.isEatingFruit then continue end
+--
+--             -- Not while we are meant to be inert or in transit: eating plays
+--             -- an animation, which is the last thing to do in front of a sensor.
+--             if _0xa299._0xHLWNUnsafe() then continue end
+--             if _0xa299._0xHLWNArena.visiting then continue end
+--             if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then continue end
+--
+--             local pct = _0xa299._0xHLWNLifeForcePct()
+--             if not pct or pct >= (_0xa299._0xHLWNFruitPct or 80) then continue end
+--             if not _0xa299._0xHLWNHasFruit() then continue end
+--
+--             -- Pause the farm for the eat. isEatingFruit holds the Heartbeat
+--             -- off, which otherwise re-pins the character every frame and would
+--             -- drag us straight out of the animation.
+--             _0xa299._0xb81e.isEatingFruit = true
+--             _0xa299._0x8545:Notify("Farm", string.format(
+--                 "LifeForce %d%% - eating a %s", math.floor(pct),
+--                 _0xa299._0xHLWNFruitName), 3, "info")
+--
+--             local ok = pcall(_0xa299._0xHLWNEatFruit)
+--             _0xa299._0xb81e.isEatingFruit = false
+--             if not ok then
+--                 _0xa299._0x8545:Notify("Farm",
+--                     "Could not eat a " .. _0xa299._0xHLWNFruitName, 3, "warning")
+--             end
+--         end
+--         _0xa299._0xb81e.isEatingFruit = false
+--     end)
+-- end
+--
+-- function _0xa299._0xHLWNFruitStop()
+--     _0xa299._0xb81e.autoEatFruit = false
+--     _0xa299._0xb81e.isEatingFruit = false
+--     if _0xa299._0xb81e.fruitConnection then
+--         pcall(function() task.cancel(_0xa299._0xb81e.fruitConnection) end)
+--         _0xa299._0xb81e.fruitConnection = nil
+--     end
+-- end
+--
+-- function _0xa299._0xHLWNEatFruit()
+--     local item = _0xa299._0xHLWNFruitName
+--     local waitFor = 2
+--
+--     pcall(function()
+--         local de = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
+--         de:FireServer("Item", "Selected", item)
+--     end)
+--     task.wait(0.2)
+--
+--     -- Play the item's own animation and take its length, exactly as the client
+--     -- does. If any of that is unavailable the third argument goes as nil rather
+--     -- than as a made-up number: the game sends nil for an item with no
+--     -- animation, so nil is a shape it already accepts.
+--     local actionTime
+--     pcall(function()
+--         local gm = require(_0xa299._0xe08d.GameManager)
+--         local cfg = gm.Items and gm.Items[item]
+--         if not cfg then return end
+--
+--         if cfg.ActionTime then
+--             actionTime = cfg.ActionTime
+--         elseif cfg.Animation and cfg.Animation ~= "" then
+--             local char = _0xa299._0x396d.Character
+--             local hum = char and char:FindFirstChildOfClass("Humanoid")
+--             if hum then
+--                 local track = gm:getAnimation(cfg.Animation, hum)
+--                 if track then
+--                     track:Play()
+--                     actionTime = track.Length
+--                 end
+--             end
+--         end
+--     end)
+--     if tonumber(actionTime) and tonumber(actionTime) > 0 then
+--         waitFor = tonumber(actionTime)
+--     end
+--
+--     pcall(function()
+--         local de = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
+--         de:FireServer("Consumed", item, actionTime)
+--     end)
+--
+--     -- Sit out the animation before the farm takes the character back.
+--     task.wait(waitFor + 0.3)
+-- end
+
 -- Seconds of ACTIVE farming with no damage dealt to the boss before the farm
 -- gives up on it. Safespot / hiding / HP-recovery time does not count.
 _0xa299._0xHLWNBossStall = 40
@@ -29654,6 +29904,8 @@ function _0xa299._0xc0db()
     _0xa299._0xb81e.m1Connection = _0xa299._0x64b8.Heartbeat:Connect(function(dt)
         if not _0xa299._0xb81e.enabled or not _0xa299._0xb81e.autoM1 then return end
         if _0xa299._0xb81e.hiding or _0xa299._0xb81e.playerHiding or _0xa299._0xb81e.isSearching then return end
+        -- Mid-eat: the animation is playing, so do not swing through it.
+        if _0xa299._0xb81e.isEatingFruit then return end
 
         m1Accum = m1Accum + dt
         if m1Accum < _0xa299._0xHLWNM1Gap() then return end
@@ -29827,6 +30079,10 @@ function _0xa299._0xc0db()
         -- without this they fight and neither works.
         if _0xa299._0xTBSK and _0xa299._0xTBSK.busy then return end
 
+        -- Eating a Life Up Fruit plays an animation and this loop re-pins the
+        -- character every frame, so stand off until it is done.
+        if _0xa299._0xb81e.isEatingFruit then return end
+
         -- Walking to a boss arena moves the character and this loop re-pins
         -- every frame, so stand off for the trip - same reason as below.
         --
@@ -29836,7 +30092,7 @@ function _0xa299._0xc0db()
         -- because hiding moves the character every frame and would fight the
         -- trip for it.
         if _0xa299._0xHLWNArena and _0xa299._0xHLWNArena.visiting then
-            if _0xa299._0x6378 and _0xa299._0x2008 then
+            if _0xa299._0xHLWNWatched() then
                 _0xa299._0xHLWNArena.abort = true
             end
             return
@@ -29855,7 +30111,7 @@ function _0xa299._0xc0db()
         -- character every frame, and doing that while the cycle is mid-travel
         -- would just make the two fight, which is the Treat Basket bug again.
         if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then
-            if _0xa299._0x6378 and _0xa299._0x2008 then
+            if _0xa299._0xHLWNWatched() then
                 _0xa299._0xHLWNCP.abortRequested = true
             end
             return
@@ -30002,8 +30258,9 @@ function _0xa299._0xc0db()
             end
         end
         
-        -- Check if being observed by chakra sense
-        if _0xa299._0x6378 then
+        -- Check if being observed. _0xHLWNWatched, not the raw _0x6378 flag:
+        -- that flag is also written by Line of Sight and can be left stuck.
+        if _0xa299._0xHLWNWatched() then
             if not _0xa299._0xb81e.hiding then
                 _0xa299._0xb81e.hiding = true
                 _0xa299._0x8545:Notify("Farm", "Halloween Farm: Chakra Sense, went to safespot", 2, "info")
@@ -30084,10 +30341,38 @@ function _0xa299._0xc0db()
                 end
             end
 
-            _0xa299._0xded8("hiding", "", "")
-            hrp.CFrame = _0xa299._0xdde4()
-            return
+            -- BOUNDED. _0x6378 is re-asserted every evaluation while ANYONE
+            -- has Chakra Sense EQUIPPED, not only while they are casting it
+            -- (see the re-assert note in the notifier). That is deliberate for
+            -- quests, but it means a sensor who stops sensing and simply keeps
+            -- the skill on holds this flag true for as long as they stay in the
+            -- server -- and this branch only un-hides when the flag goes false,
+            -- so the farm sat at the safespot indefinitely with no way back.
+            --
+            -- So after a grace period, fall back to the harder question: is
+            -- anyone ACTUALLY observing right now? Having the skill equipped is
+            -- not the same as watching, and _0x7eaf is the live set of people
+            -- who really are. If it is empty, resume and carry on farming.
+            _0xa299._0xb81e.hidingSince = _0xa299._0xb81e.hidingSince or tick()
+            local hidFor = tick() - _0xa299._0xb81e.hidingSince
+            local reallyWatched = _0xa299._0xHLWNWatched()
+
+            if hidFor >= (_0xa299._0xHLWNHideGrace or 20) and not reallyWatched then
+                _0xa299._0xb81e.hiding = false
+                _0xa299._0xb81e.hidingSince = nil
+                _0xa299._0xb81e.observedStartTime = nil
+                pcall(function() _0xa299._0x220a.removeSpoofProtection() end)
+                _0xa299._0x8545:Notify("Farm",
+                    "Nobody is actually sensing, back to farming", 3, "check")
+                _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
+                -- Deliberately NOT returning: carry on into the farm below.
+            else
+                _0xa299._0xded8("hiding", "", "")
+                hrp.CFrame = _0xa299._0xdde4()
+                return
+            end
         else
+            _0xa299._0xb81e.hidingSince = nil
             -- Not observed: reset the timeout so it measures one continuous
             -- stretch of being watched rather than a lifetime total.
             _0xa299._0xb81e.observedStartTime = nil
@@ -31018,6 +31303,10 @@ function _0xa299._0xefc6()
     _0xa299._0xb81e.bossDamageAt = nil
     _0xa299._0xb81e.flickerObserveTimes = {}
     _0xa299._0xb81e.observedStartTime = nil
+    -- The eat loop runs off its own toggle, so the farm stopping only has to
+    -- drop the pause flag; the loop itself keeps watching.
+    _0xa299._0xb81e.hidingSince = nil
+    _0xa299._0xb81e.isEatingFruit = false
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
     _0xa299._0xb81e.isRecoveringHP = false
@@ -31319,6 +31608,18 @@ end
 _0xa299._0xHLWN:AddToggle("Halloween Auto Sell Gems", false, function(Value)
     _0xa299._0xb81e.autoSellGems = Value
 end)
+
+-- AUTO EAT LIFEFRUITS: see the commented block above for why.
+-- _0xa299._0xHLWN:AddToggle("Auto Eat Lifefruits", false, function(Value)
+--     if Value then
+--         _0xa299._0xHLWNFruitStop()        -- clear any previous loop first
+--         _0xa299._0xb81e.autoEatFruit = true
+--         _0xa299._0xHLWNFruitRun()
+--     else
+--         _0xa299._0xHLWNFruitStop()
+--     end
+-- end, {Flag = "HLWNAutoEatFruit", Type = "info",
+--       Text = "eats a life up fruit when your lifeforce drops below 80%"})
 
 -- Text differs from the Boss Farm's on purpose: Library.Options is keyed by
 -- element text, so two toggles sharing one would cross in the save manager.
