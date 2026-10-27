@@ -480,11 +480,9 @@ _0xa299._0x396d = _0xa299._0x71bb.LocalPlayer
 
 -- Ban/Kick Detection Webhook + Supabase Logging
 pcall(function()
-    -- Also parked on _0xa299: the remote-arg verifier posts to this same alert
-    -- channel from its own block further down, and one definition means the two
-    -- cannot drift apart if the URL is ever rotated.
-    _0xa299._0xBanHook = "https://discord.com/api/webhooks/1493347328046661722/D4bkjSSATmmz4L0Gnwi7olWmOwEBow3HuW0rdk2FnI8XdJ43L0YCQSFKBMUyvLZK5RNr"
-    local BAN_WEBHOOK_URL = _0xa299._0xBanHook
+    -- Ban/kick alerts only. The remote-arg verifier has its own channel
+    -- (_0xa299._0xSigHook), so its routine traffic cannot rate-limit this one.
+    local BAN_WEBHOOK_URL = "https://discord.com/api/webhooks/1493347328046661722/D4bkjSSATmmz4L0Gnwi7olWmOwEBow3HuW0rdk2FnI8XdJ43L0YCQSFKBMUyvLZK5RNr"
     local CoreGui = game:GetService("CoreGui")
     
     CoreGui.DescendantAdded:Connect(function(obj)
@@ -1721,11 +1719,17 @@ end
 --      are ignored here: we send no tag for them either way.
 --
 -- Auto is on because the game bumps these constantly. It is only safe because
--- the scan is deterministic: it reads the client's own instructions, votes by
--- majority across call sites, and self-tests its opcode calibration first. The
+-- the scan is deterministic: it reads the client's own instructions, requires
+-- every call site to AGREE, and self-tests its opcode calibration first. The
 -- old auto-correction that got CheckMeleeHit wrong was nothing like this - it
 -- GUESSED from observed traffic.
 _0xa299._0xTagAuto = true
+
+-- Where the verifier's alerts go. Its OWN channel, deliberately not the ban
+-- webhook: in auto mode a bumped tag posts once per user per session until
+-- _0xTagsFallback is updated, and Discord rate-limits per webhook, so sharing
+-- one would let that routine traffic crowd out the ban alerts that matter.
+_0xa299._0xSigHook = "https://discord.com/api/webhooks/1564781907529441471/eD8pV99-IjChEiYqn3phQiS497ZokknE3A_PcsA2MWdGhFo_Ef20Q_OTGRJiE-he9rA2"
 
 -- Last known good. In hardcoded mode this is authoritative. In auto mode it is
 -- only the seed: it is what the table holds for the ~200 ms the first scan
@@ -2238,7 +2242,7 @@ function _0xa299._0xSigAlert(fatal, detail, verified, pending)
         end
 
         _0xa299._0x0a65({
-            Url = _0xa299._0xBanHook,
+            Url = _0xa299._0xSigHook,
             Method = "POST",
             Headers = {["Content-Type"] = "application/json"},
             Body = _0xa299._0x5f86:JSONEncode({
