@@ -21930,10 +21930,7 @@ end)
 _0xa299._0xdede = {
     enabled = false,
     uiCreated = false,
-    extremeCaution = false,
-    lineOfSight = false,
-    losConnection = nil,
-    losCooldown = 0
+    extremeCaution = false
 }
 
 _0xa299._0xHoveringUsers = {} -- Track users with Chakra Sense in their skillGUI
@@ -22645,7 +22642,7 @@ _0xa299._0xdede.settings:AddToggle("Extreme Caution", false, function(Value)
     end
 end, {Type = "info", Text = "Also checks if, players are Holding Chakra Sense"})
 
-function _0xa299._0xLOSIsFarming()
+function _0xa299._0xAnyFarmRunning()
     if _0xa299._0x1915 and _0xa299._0x1915.farming then return true end
     if _0xa299._0xe2ce and _0xa299._0xe2ce.enabled then return true end       -- switchpowder
     if _0xa299._0xAutoProg and _0xa299._0xAutoProg.enabled then return true end
@@ -22660,104 +22657,36 @@ function _0xa299._0xLOSIsFarming()
     return false
 end
 
-function _0xa299._0xLOSCheck()
-    local myChar = _0xa299._0x396d.Character
-    if not myChar then return false, nil end
-    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
-    if not myHRP then return false, nil end
-
-    local myPos = myHRP.Position
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    rayParams.FilterDescendantsInstances = {myChar}
-
-    for _, plr in ipairs(_0xa299._0x71bb:GetPlayers()) do
-        if plr ~= _0xa299._0x396d and plr.Character then
-            local otherHRP = plr.Character:FindFirstChild("HumanoidRootPart")
-            local otherHead = plr.Character:FindFirstChild("Head")
-            if otherHRP and otherHead then
-                local eyePos = otherHead.Position + Vector3.new(0, 1, 0)
-                local direction = (myPos - eyePos)
-                local distance = direction.Magnitude
-
-                if distance <= 300 then
-                    rayParams.FilterDescendantsInstances = {myChar, plr.Character}
-                    local result = workspace:Raycast(eyePos, direction.Unit * distance, rayParams)
-
-                    if result == nil or (result and result.Instance and result.Instance:IsDescendantOf(myChar)) then
-                        return true, plr.Name, distance
-                    end
-                end
-            end
-        end
+---------------------------------------------------------------------
+-- OBSERVED-FLAG WATCHDOG
+--
+-- _0x6378 is read by every farm in the script as "am I being watched". It used
+-- to have a SECOND writer besides the chakra-sense notifier -- the Line of
+-- Sight feature -- which set it whenever any player could simply see you, and
+-- cleared it only from inside its own loop. Turning that feature off while it
+-- had someone in view left the flag true with nothing able to clear it: true
+-- for the rest of the session, every farm hiding forever, while the top bar
+-- correctly read CLEAR because the bar looks at the tables instead.
+--
+-- Line of Sight is gone now, so the notifier is the only writer and that
+-- cannot happen again. This stays as a cheap guarantee that the flag always
+-- agrees with what the bar shows -- which is the thing that actually went
+-- wrong, and the thing worth never letting drift again.
+--
+-- It ONLY EVER CLEARS, and only when both tables are empty. It never sets, so
+-- it cannot mask a real detection or race the notifier.
+---------------------------------------------------------------------
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        pcall(function()
+            if not _0xa299._0x6378 then return end
+            if next(_0xa299._0x7eaf or {}) ~= nil then return end
+            if next(_0xa299._0xHoveringUsers or {}) ~= nil then return end
+            _0xa299._0x6378 = false
+        end)
     end
-    return false, nil
-end
-
-function _0xa299._0xLOSStart()
-    if _0xa299._0xdede.losConnection then return end
-
-    _0xa299._0xdede.losConnection = _0xa299._0x64b8.Heartbeat:Connect(function()
-        if not _0xa299._0xdede.lineOfSight then return end
-        if not _0xa299._0xLOSIsFarming() then return end
-        if tick() - _0xa299._0xdede.losCooldown < 0.5 then return end
-        _0xa299._0xdede.losCooldown = tick()
-
-        local canSee, playerName, dist = _0xa299._0xLOSCheck()
-        if canSee then
-            if not _0xa299._0x6378 then
-                _0xa299._0x8545:Notify("Line of Sight", playerName .. " can see you", 3, "warning")
-            end
-
-            _0xa299._0x6378 = true
-
-            if _0xa299._0x1915 and _0xa299._0x1915.farming then
-                _0xa299._0x1915.playerNearby = true
-            end
-
-            local safeCFrame = _0xa299._0xdde4()
-            if safeCFrame and _0xa299._0x396d.Character and _0xa299._0x396d.Character:FindFirstChild("HumanoidRootPart") then
-                _0xa299._0x396d.Character.HumanoidRootPart.CFrame = safeCFrame
-            end
-
-            _0xa299._0xdede.losCooldown = tick() + 2
-        else
-            if _0xa299._0x6378 and _0xa299._0xdede.lineOfSight then
-                local stillObserved = false
-                for _ in pairs(_0xa299._0x7eaf) do stillObserved = true break end
-                local stillHovering = false
-                for _ in pairs(_0xa299._0xHoveringUsers) do stillHovering = true break end
-
-                if not stillObserved and not stillHovering then
-                    _0xa299._0x6378 = false
-                    if _0xa299._0x1915 and _0xa299._0x1915.farming and _0xa299._0x1915.playerNearby then
-                        _0xa299._0x1915.playerNearby = false
-                        _0xa299._0x1915.hidingFromChakraSense = false
-                    end
-                    _0xa299._0x8545:Notify("Line of Sight", "No longer visible, back to farming", 3, "check")
-                end
-            end
-        end
-    end)
-end
-
-function _0xa299._0xLOSStop()
-    if _0xa299._0xdede.losConnection then
-        _0xa299._0xdede.losConnection:Disconnect()
-        _0xa299._0xdede.losConnection = nil
-    end
-end
-
-_0xa299._0xdede.settings:AddToggle("Line of Sight", false, function(Value)
-    _0xa299._0xdede.lineOfSight = Value
-    if Value then
-        _0xa299._0xLOSStart()
-        _0xa299._0x8545:Notify("Security", "Line of Sight Enabled", 3, "warning")
-    else
-        _0xa299._0xLOSStop()
-        _0xa299._0x8545:Notify("Security", "Line of Sight disabled", 3, "info")
-    end
-end, {Type = "warning", Text = "While farming, teleports to safety if ANY player has line of sight on you"})
+end)
 
 ---------------------------------------------------------------------
 -- PLAYER PROXIMITY SYSTEM
@@ -23734,7 +23663,7 @@ task.spawn(function()
             -- Pause watchdog while disabled; nothing to do
         else
             local isFarming = false
-            pcall(function() isFarming = _0xa299._0xLOSIsFarming() end)
+            pcall(function() isFarming = _0xa299._0xAnyFarmRunning() end)
 
             if isFarming and not _0xa299._0xLFKP.isKicking then
                 local pct = getLifeForcePercent()
@@ -27924,50 +27853,13 @@ end
 -- Chakra sense is tested the way the boss farm tests it, `_0x6378 and _0x2008`,
 -- so a stale observed flag with the notifier off cannot pin this.
 ---------------------------------------------------------------------
--- AM I ACTUALLY BEING WATCHED?
---
--- _0x6378 is NOT a trustworthy answer on its own, because it has TWO
--- unrelated writers:
---
---   * the chakra-sense notifier, from _0x7eaf (casting) and
---     _0xHoveringUsers (equipped)
---   * the LINE OF SIGHT feature, which sets it at 22712 whenever any player
---     can simply see you -- nothing to do with chakra sense
---
--- That is why the top bar could read CLEAR while the farm insisted it was
--- observed: the bar looks at the two chakra tables (22254), the farm looked
--- at the flag, and LOS had set the flag.
---
--- Worse, LOS's own clear path (22725) runs only inside its heartbeat, which
--- returns early unless lineOfSight is on AND _0xLOSIsFarming() is true. Turn
--- LOS off while it had something in view and the flag is never cleared by
--- anyone -- stuck true for the rest of the session with both chakra tables
--- empty.
---
--- So ask the sources instead. Cheap: no raycast here, LOS's own heartbeat
--- already does that and maintains the flag while it is running, so the flag
--- is honoured ONLY while that feature is actually on.
----------------------------------------------------------------------
-function _0xa299._0xHLWNWatched()
-    if next(_0xa299._0x7eaf or {}) ~= nil then return true end
-    if next(_0xa299._0xHoveringUsers or {}) ~= nil then return true end
-    if _0xa299._0xdede and _0xa299._0xdede.lineOfSight then
-        return _0xa299._0x6378 and true or false
-    end
-    return false
-end
-
----------------------------------------------------------------------
 -- Shared "we should not be standing out in the open right now" test. Used by
 -- both things that walk the character somewhere exposed: the Corrupted Point
 -- cycle and the boss arena visit.
 function _0xa299._0xHLWNUnsafe()
     local B = _0xa299._0xb81e
     if not B.enabled then return "farm stopped" end
-    -- _0xHLWNWatched, not the raw flag: _0x6378 is also written by Line of
-    -- Sight and can be left stuck true, which would otherwise block the
-    -- Corrupted Point method and the arena trips for the whole session.
-    if _0xa299._0xHLWNWatched() then return "chakra sense" end
+    if _0xa299._0x6378 and _0xa299._0x2008 then return "chakra sense" end
     if B.hiding then return "chakra sense" end
     if B.playerHiding then return "player nearby" end
     if B.isRecoveringHP then return "low HP" end
@@ -28359,9 +28251,6 @@ end
 -- -- LifeForce / MaxLifeForce are read the way the Lifeforce Kick protection
 -- -- reads them, including the LifeForceMax spelling the server sometimes uses.
 -- ---------------------------------------------------------------------
--- Seconds of hiding before the farm stops trusting the observed flag and
--- checks whether anyone is ACTUALLY sensing. See the note at the hide.
-_0xa299._0xHLWNHideGrace = 20
 
 _0xa299._0xHLWNFruitName = "Life Up Fruit"
 -- _0xa299._0xHLWNFruitPct  = 80   -- eat below this percent of max LifeForce
@@ -30092,7 +29981,7 @@ function _0xa299._0xc0db()
         -- because hiding moves the character every frame and would fight the
         -- trip for it.
         if _0xa299._0xHLWNArena and _0xa299._0xHLWNArena.visiting then
-            if _0xa299._0xHLWNWatched() then
+            if _0xa299._0x6378 and _0xa299._0x2008 then
                 _0xa299._0xHLWNArena.abort = true
             end
             return
@@ -30111,7 +30000,7 @@ function _0xa299._0xc0db()
         -- character every frame, and doing that while the cycle is mid-travel
         -- would just make the two fight, which is the Treat Basket bug again.
         if _0xa299._0xHLWNCP and _0xa299._0xHLWNCP.busy then
-            if _0xa299._0xHLWNWatched() then
+            if _0xa299._0x6378 and _0xa299._0x2008 then
                 _0xa299._0xHLWNCP.abortRequested = true
             end
             return
@@ -30258,9 +30147,8 @@ function _0xa299._0xc0db()
             end
         end
         
-        -- Check if being observed. _0xHLWNWatched, not the raw _0x6378 flag:
-        -- that flag is also written by Line of Sight and can be left stuck.
-        if _0xa299._0xHLWNWatched() then
+        -- Check if being observed by chakra sense
+        if _0xa299._0x6378 then
             if not _0xa299._0xb81e.hiding then
                 _0xa299._0xb81e.hiding = true
                 _0xa299._0x8545:Notify("Farm", "Halloween Farm: Chakra Sense, went to safespot", 2, "info")
@@ -30341,38 +30229,10 @@ function _0xa299._0xc0db()
                 end
             end
 
-            -- BOUNDED. _0x6378 is re-asserted every evaluation while ANYONE
-            -- has Chakra Sense EQUIPPED, not only while they are casting it
-            -- (see the re-assert note in the notifier). That is deliberate for
-            -- quests, but it means a sensor who stops sensing and simply keeps
-            -- the skill on holds this flag true for as long as they stay in the
-            -- server -- and this branch only un-hides when the flag goes false,
-            -- so the farm sat at the safespot indefinitely with no way back.
-            --
-            -- So after a grace period, fall back to the harder question: is
-            -- anyone ACTUALLY observing right now? Having the skill equipped is
-            -- not the same as watching, and _0x7eaf is the live set of people
-            -- who really are. If it is empty, resume and carry on farming.
-            _0xa299._0xb81e.hidingSince = _0xa299._0xb81e.hidingSince or tick()
-            local hidFor = tick() - _0xa299._0xb81e.hidingSince
-            local reallyWatched = _0xa299._0xHLWNWatched()
-
-            if hidFor >= (_0xa299._0xHLWNHideGrace or 20) and not reallyWatched then
-                _0xa299._0xb81e.hiding = false
-                _0xa299._0xb81e.hidingSince = nil
-                _0xa299._0xb81e.observedStartTime = nil
-                pcall(function() _0xa299._0x220a.removeSpoofProtection() end)
-                _0xa299._0x8545:Notify("Farm",
-                    "Nobody is actually sensing, back to farming", 3, "check")
-                _0xa299._0xb81e.animTrack = _0xa299._0xHLWNResumeAnim()
-                -- Deliberately NOT returning: carry on into the farm below.
-            else
-                _0xa299._0xded8("hiding", "", "")
-                hrp.CFrame = _0xa299._0xdde4()
-                return
-            end
+            _0xa299._0xded8("hiding", "", "")
+            hrp.CFrame = _0xa299._0xdde4()
+            return
         else
-            _0xa299._0xb81e.hidingSince = nil
             -- Not observed: reset the timeout so it measures one continuous
             -- stretch of being watched rather than a lifetime total.
             _0xa299._0xb81e.observedStartTime = nil
@@ -31305,7 +31165,6 @@ function _0xa299._0xefc6()
     _0xa299._0xb81e.observedStartTime = nil
     -- The eat loop runs off its own toggle, so the farm stopping only has to
     -- drop the pause flag; the loop itself keeps watching.
-    _0xa299._0xb81e.hidingSince = nil
     _0xa299._0xb81e.isEatingFruit = false
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
