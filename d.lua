@@ -1735,9 +1735,17 @@ _0xa299._0xSigHook = "https://discord.com/api/webhooks/1564781907529441471/eD8pV
 -- only the seed: it is what the table holds for the ~200 ms the first scan
 -- takes, and after that the scan has either overwritten it or kicked. Keep it
 -- current anyway - it is the whole of hardcoded mode, which is the fallback
--- when auto cannot run. Verified against the v1587 client.
+-- when auto cannot run. Verified against the v1594 client.
+--
+-- These are NOT the same across live servers during a rollout: 1587 and 1594
+-- servers were both up the same evening with different CheckMeleeHit values. A
+-- single hardcoded set cannot be right for both, which is the whole argument for
+-- auto mode - this table tracks the NEWEST observed value.
 _0xa299._0xTagsFallback = {
-    CheckMeleeHit  = 3,   -- v1561
+    -- v1594, was 3 on v1561-1587. Zero is a legal tag, and the scanner must
+    -- never "sanity check" it away: a plausibility filter rejecting 0 is
+    -- exactly what made v1591 report "the client sends no tag" and false-kick.
+    CheckMeleeHit  = 0,
     ServerTeleport = 3,   -- v1561 (lives in the ServerList Handler, not the
                           -- main client script - a dump of that script alone
                           -- will NOT show it)
