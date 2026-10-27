@@ -480,7 +480,11 @@ _0xa299._0x396d = _0xa299._0x71bb.LocalPlayer
 
 -- Ban/Kick Detection Webhook + Supabase Logging
 pcall(function()
-    local BAN_WEBHOOK_URL = "https://discord.com/api/webhooks/1493347328046661722/D4bkjSSATmmz4L0Gnwi7olWmOwEBow3HuW0rdk2FnI8XdJ43L0YCQSFKBMUyvLZK5RNr"
+    -- Also parked on _0xa299: the remote-arg verifier posts to this same alert
+    -- channel from its own block further down, and one definition means the two
+    -- cannot drift apart if the URL is ever rotated.
+    _0xa299._0xBanHook = "https://discord.com/api/webhooks/1493347328046661722/D4bkjSSATmmz4L0Gnwi7olWmOwEBow3HuW0rdk2FnI8XdJ43L0YCQSFKBMUyvLZK5RNr"
+    local BAN_WEBHOOK_URL = _0xa299._0xBanHook
     local CoreGui = game:GetService("CoreGui")
     
     CoreGui.DescendantAdded:Connect(function(obj)
@@ -803,8 +807,15 @@ _0xa299._0x6905 = true
 
 -- Re-execution loader, used by the queue_on_teleport payload below so the
 -- script comes back after a server hop. The payload restores script_key from
--- the key file before calling this, so whatever lives here can rely on it.
-_0xa299._0x027f = "https://raw.githubusercontent.com/chomeservicesmain-hue/sc/refs/heads/main/d.lua"
+-- the key file before calling this, since the loader behind this URL expects it.
+--
+-- game:HttpGet is UNAUTHENTICATED, so whatever this points at has to be
+-- readable with no credentials. A raw.githubusercontent link carrying a
+-- ?token=GHSAT... is GitHub's short-lived raw token, not a durable one - when
+-- it expires or the repo is private, HttpGet receives the body "404: Not Found"
+-- and the loadstring below fails with nothing to report it, which looks like
+-- "persistence randomly stopped working" rather than a dead link.
+_0xa299._0x027f = "https://raw.githubusercontent.com/chomeservicesmain-hue/sc/refs/heads/main/d.lua?token=GHSAT0AAAAAAEN3YIDDWZPSNLU6RE3VZR442XBGF2A"
 
 function _0xa299._0xa712()
     pcall(function()
@@ -1621,42 +1632,107 @@ end
 -- A legit client never sends the old one, and M1 fires many times a second, so
 -- a stale tag is a standing fingerprint that accumulates fast.
 --
--- THE VALUES BELOW ARE HARDCODED and are what all 64 call sites read. They are
--- verified against the v1561 client; re-check them against a fresh dump when
--- the game updates, with tools/audit_remote_args.py.
+-- _0xTagAuto below picks where the 64 call sites get their values: read live
+-- off the client's bytecode (default), or from the hardcoded _0xTagsFallback.
+-- Either way the hardcoded table is what the script sends until the first scan
+-- lands, and is the fallback for anything the scan cannot resolve, so keep it
+-- current regardless.
 --
--- AUTO-DETECTION IS OFF (2026-10-25). It got CheckMeleeHit wrong, and its M1
--- probe dropped every CheckMeleeHit while its flag was up - a flag left set
--- means no M1 reaches the server at all. Three blocks are parked rather than
--- deleted: the learning state and the hook branch up at the BanMe hook, and
--- _0xTagApply / _0xTagDrain / _0xTagProbeM1 below. The research in them is
--- still good; the automation was not.
+-- VALUE vs SHAPE is the distinction that makes auto mode safe. A bumped number
+-- in an unmoved argument slot is substitutable, so auto mode substitutes it. A
+-- changed method or a changed argument slot is NOT - our call sites would send
+-- the wrong shape whatever number they carry - so that kicks in both modes.
 --
--- WHAT SURVIVES is _0xTagDetect, and it only CHECKS. It decompiles the
--- ServerList Handler (10 KB, ~58 ms) and compares the ServerTeleport tag
--- against the table. On a mismatch it KICKS with "Anticheat change detected,
--- open a ticket" rather than correcting anything - a wrong auto-corrected tag
--- is worse than not playing, and ServerTeleport fires on every hop. It never
--- writes to the table.
+-- THE OLD AUTO-CORRECTION IS STILL OFF (2026-10-25), and deliberately. Three blocks are
+-- parked rather than deleted: the learning state and the hook branch up at the
+-- BanMe hook, and _0xTagApply / _0xTagDrain / _0xTagProbeM1 below. They tried
+-- to LEARN a tag and write it into the table, which got CheckMeleeHit wrong,
+-- and the M1 probe dropped every CheckMeleeHit while its flag was up - a flag
+-- left set means no M1 reaches the server at all. Verification replaced them;
+-- a wrong auto-corrected tag is worse than not playing.
+--
+-- HOW THE VERIFIER READS THE TAG (2026-10-27). The tag is not a constant, so
+-- the old note here said it was unreadable. It is readable - from the compiled
+-- instruction stream, with no network traffic and no gameplay:
+--
+--   1. getgc -> every live closure whose debug.info source is a real script,
+--   2. debug.getconstants on it; skip unless it holds both a remote name we
+--      care about AND FireServer / InvokeServer,
+--   3. getfunctionbytecode on it, then find the word
+--        LOADK R(base), K[<remote name>]
+--      which is a REAL instruction boundary, so stepping 4 bytes at a time from
+--      there steps over AUX words instead of misreading them as instructions,
+--   4. first LOADN at or after it carries the tag in its D field,
+--   5. require a NAMECALL within 8 words whose AUX constant is FireServer or
+--      InvokeServer. That is what separates a call site from an unrelated
+--      `x == "Block"` comparison, and it also tells us WHICH method is used,
+--   6. argument slot = LOADN register - LOADK register + 1. So an argument
+--      INSERTED ahead of the tag is caught even when its value is unchanged.
+--
+-- The three opcode bytes are NOT hardcoded. _0xSigCalibrate compiles a probe of
+-- known shape, reads the bytes back out of it, and then re-extracts the probe's
+-- own sentinel as a self-test. A Luau opcode reshuffle therefore turns the
+-- check OFF rather than making it report nonsense.
+--
+-- Measured live on v1587: 8789 closures, all 11 remotes resolved, ~135 ms total
+-- spread across frames so there is no hitch. Every value read matched the table
+-- below exactly - tag AND argument slot.
 --
 -- WHAT DOES NOT WORK, so nobody wastes time on it again:
 --
 --   * Decompiling the main client script. It is ~1 MB; measured live it ran
 --     over 60 s without finishing and would stutter the game. Not viable.
---   * debug.getconstants on the protos that call these remotes. Fast (0.8 ms
---     for all 372 protos) but the tag is NOT THERE: small integers are encoded
---     as immediate bytecode operands, not constant-table entries. The three
---     protos that call CheckMeleeHit hold {0.1, 0.25, 0.3, 1, 100, inf} and
---     similar - no 3 anywhere. StartQuest's proto holds {0,0.1,1,2,3,4,5,6,7},
---     which is ambiguous even where the value does appear.
+--   * debug.getconstants ALONE. The tag is not in the constant table: small
+--     integers are immediate bytecode operands. Constants only get us the
+--     anchor (step 3) and the method name (step 5).
+--   * debug.getprotos as the closure source. It returns ProtoProxy values and
+--     getfunctionbytecode rejects those outright - "function expected, got
+--     ProtoProxy" - which is why the scan has to come from getgc. getconstants
+--     does accept a ProtoProxy, which makes the failure look like "no match".
+--   * ipairs over a getconstants result. It can contain nil holes and ipairs
+--     stops at the first one, silently hiding most of the table. Walk to the
+--     real maximum key instead. This one cost an entire debugging pass.
 --   * decompile() on a single function or proto. Volt rejects both:
 --     "LuaSourceContainer or string expected".
---   * getfunctionbytecode DOES work and is tiny and fast (4093 bytes, 0.4 ms
---     for the proto that fires CheckMeleeHit), but decompile() will not accept
---     a function chunk - "invalid or unsupported Luau bytecode" - and hand-
---     parsing LOADN immediates would break on any Luau bytecode revision.
 ---------------------------------------------------------------------
-_0xa299._0xTags = {
+-- WHICH SOURCE THE 64 CALL SITES GET THEIR TAGS FROM.
+--
+--   true  - the SCAN is authoritative. Tags are read off the live client's
+--           bytecode and used, so a bump needs no code change at all. A bump
+--           is therefore not an error and does NOT kick; it is just adopted.
+--           What kicks is the scan FAILING, because then there is nothing
+--           trustworthy to send - see the three failure cases below.
+--   false - the HARDCODED table is authoritative. The scan runs only to CHECK,
+--           any detected change kicks, and being unable to read the client is
+--           merely the status quo and stays silent.
+--
+-- The two modes therefore kick on opposite things, which is the point: auto
+-- kicks when it cannot know the right value, hardcoded kicks when it learns
+-- its value is wrong.
+--
+-- THE THREE WAYS AUTO MODE FAILS, all of which kick:
+--   1. The client cannot be read at all - no getfunctionbytecode, calibration
+--      failed, or the self-test failed. NOTE this means a user on an executor
+--      without those globals cannot play in auto mode; they need `false`.
+--   2. A remote's method or ARGUMENT SLOT moved. No value substitution can fix
+--      that - our call sites would send the wrong shape whatever number they
+--      carry - so it is fatal in both modes.
+--   3. A tagged remote never resolves across all retry passes. Untagged ones
+--      are ignored here: we send no tag for them either way.
+--
+-- Auto is on because the game bumps these constantly. It is only safe because
+-- the scan is deterministic: it reads the client's own instructions, votes by
+-- majority across call sites, and self-tests its opcode calibration first. The
+-- old auto-correction that got CheckMeleeHit wrong was nothing like this - it
+-- GUESSED from observed traffic.
+_0xa299._0xTagAuto = true
+
+-- Last known good. In hardcoded mode this is authoritative. In auto mode it is
+-- only the seed: it is what the table holds for the ~200 ms the first scan
+-- takes, and after that the scan has either overwritten it or kicked. Keep it
+-- current anyway - it is the whole of hardcoded mode, which is the fallback
+-- when auto cannot run. Verified against the v1587 client.
+_0xa299._0xTagsFallback = {
     CheckMeleeHit  = 3,   -- v1561
     ServerTeleport = 3,   -- v1561 (lives in the ServerList Handler, not the
                           -- main client script - a dump of that script alone
@@ -1669,10 +1745,22 @@ _0xa299._0xTags = {
     -- track. Verified against the v1561 client (lines 1986, 15105).
 }
 
+-- What the call sites actually index. Seeded from the fallback so it is correct
+-- from the first frame, then overwritten per-remote by the scan when auto is on.
+-- It is this table, never the fallback, that the 64 call sites read.
+_0xa299._0xTags = {}
+for _0xk, _0xv in pairs(_0xa299._0xTagsFallback) do _0xa299._0xTags[_0xk] = _0xv end
+
 -- _0xa299._0xTagWatchList and _0xa299._0xTagSeen are created up at the BanMe
 -- hook, which captures them as upvalues. ServerTeleport is not in the watch
 -- list because the decompile path below covers it.
 
+-- UNUSED since 2026-10-27: its only caller was the decompile-based
+-- _0xTagDetect, which _0xSigCheck replaced (it reads bytecode instead, covers
+-- every remote rather than ServerTeleport alone, and needs no decompiler).
+-- Kept because it is the fallback if a future Luau build defeats the bytecode
+-- scan and a small script has to be decompiled again.
+--
 -- Pull every trailing integer the client sends for `event` out of `src`.
 -- Matches both FireServer and InvokeServer, and tolerates any arguments in
 -- between, so it does not care how many args the call has - only what the last
@@ -1766,47 +1854,526 @@ function _0xa299._0xTagProbeM1()
 end
 ]]--
 
--- ServerTeleport only: its call lives in the ServerList Handler, which is small
--- enough to decompile (~342 lines, ~65 ms measured). The main client script is
--- deliberately NOT decompiled here - see the header.
-function _0xa299._0xTagDetect()
-    if type(decompile) ~= "function" then
-        -- No decompiler on this executor: nothing to check against, so say
-        -- nothing and carry on with the hardcoded value.
-        return false, "no decompile"
+-- Expected SHAPE per remote: which method the client calls, and which argument
+-- slot carries the version tag (false = the client sends no tag at all). The
+-- tag VALUE is not repeated here - it is read from _0xTags above, so the 64
+-- call sites and the verifier still share one source of truth.
+--
+-- The untagged ones are listed on purpose: that way a tag APPEARING on one of
+-- them is caught too, which is the other half of the problem.
+_0xa299._0xSigExpect = {
+    CheckMeleeHit  = {m = "FireServer",   pos = 5},
+    ServerTeleport = {m = "InvokeServer", pos = 3},
+    Block          = {m = "InvokeServer", pos = 2},
+    PickUp         = {m = "FireServer",   pos = 3},
+    StartQuest     = {m = "InvokeServer", pos = 3},
+    EndBlock       = {m = "InvokeServer", pos = false},
+    LoadedIn       = {m = "InvokeServer", pos = false},
+    depositRyo     = {m = "InvokeServer", pos = false},
+    trickOrTreat   = {m = "InvokeServer", pos = false},
+    Consumed       = {m = "FireServer",   pos = false},
+    Menu           = {m = "FireServer",   pos = false},
+}
+
+-- Learn the three opcode bytes from a probe we compile ourselves, so a Luau
+-- opcode reshuffle cannot silently turn the scan into noise. Returns nil on
+-- anything unexpected, which disables the check.
+function _0xa299._0xSigCalibrate()
+    if type(loadstring) ~= "function" or type(getfunctionbytecode) ~= "function"
+        or type(debug) ~= "table" or type(debug.getconstants) ~= "function" then
+        return nil
     end
+    -- The leading no-arg call pushes the sentinels off constant index 0, where a
+    -- D field of 0 would collide with every zeroed word in the chunk. The two
+    -- sentinel values must stay inside the 1..9999 band _0xSigSites accepts, or
+    -- the self-test below rejects its own probe.
+    local probe = loadstring(
+        'local r = ... r:FireServer("ZZ1") r:FireServer("AAAA", 7331) r:FireServer("BBBB", 4919)')
+    if type(probe) ~= "function" then return nil end
+    local okbc, bc = pcall(getfunctionbytecode, probe)
+    if not okbc or type(bc) ~= "string" or #bc < 32 then return nil end
+    local okc, k = pcall(debug.getconstants, probe)
+    if not okc or type(k) ~= "table" then return nil end
 
-    local src
-    pcall(function()
-        local cg = _0xa299._0x396d.PlayerGui:FindFirstChild("ClientGui")
-        local mf = cg and cg:FindFirstChild("Mainframe")
-        mf = mf and mf:FindFirstChild("Rest")
-        mf = mf and mf:FindFirstChild("ServerList")
-        mf = mf and mf:FindFirstChild("MainFrame")
-        local h = mf and mf:FindFirstChild("Handler")
-        if h then src = decompile(h) end
-    end)
-
-    if type(src) ~= "string" or #src == 0 then return false, "no source" end
-    local found = _0xa299._0xTagScan(src, "ServerTeleport")
-    if not found then return false, "no match" end
-
-    -- Only ever COMPARES. A mismatch means the game changed its remote
-    -- signature, which is exactly the situation where carrying on sends a
-    -- shape no real client sends - on every hop, repeatedly. So stop dead
-    -- rather than auto-correct: a wrong guess here is worse than not playing.
-    if found ~= _0xa299._0xTags.ServerTeleport then
-        pcall(function()
-            _0xa299._0x396d:Kick("Anticheat change detected, open a ticket")
-        end)
-        return false, found
+    local iA, iB, iM
+    for i = 1, 64 do
+        local v = k[i]
+        if v == "AAAA" then iA = i - 1
+        elseif v == "BBBB" then iB = i - 1
+        elseif v == "FireServer" then iM = i - 1 end
     end
-    return true, found
+    if not (iA and iB and iM) or iA == 0 or iB == 0 then return nil end
+
+    local function dOf(p) return bc:byte(p + 2) + bc:byte(p + 3) * 256 end
+
+    -- LOADN: the one opcode carrying both sentinel values in its D field.
+    local LOADN do
+        local hit = {}
+        for i = 1, #bc - 3 do
+            local d = dOf(i)
+            if d == 7331 or d == 4919 then
+                local op = bc:byte(i); hit[op] = (hit[op] or 0) + 1
+            end
+        end
+        for op, n in pairs(hit) do if n >= 2 then LOADN = op end end
+    end
+    if not LOADN then return nil end
+
+    -- LOADK: the one opcode carrying both string constant indices.
+    local LOADK do
+        local hit = {}
+        for i = 1, #bc - 3 do
+            local d = dOf(i)
+            if d == iA or d == iB then
+                local op = bc:byte(i); hit[op] = hit[op] or {}; hit[op][d] = true
+            end
+        end
+        for op, set in pairs(hit) do if set[iA] and set[iB] then LOADK = op end end
+    end
+    if not LOADK then return nil end
+
+    -- NAMECALL sits exactly one word past the tag's LOADN, and its AUX word is
+    -- the method's constant index.
+    local NAMECALL do
+        local hit = {}
+        for i = 1, #bc - 11 do
+            local d = dOf(i)
+            if bc:byte(i) == LOADN and (d == 7331 or d == 4919) then
+                local p = i + 4
+                local aux = bc:byte(p + 4) + bc:byte(p + 5) * 256 + bc:byte(p + 6) * 65536
+                if aux == iM then local op = bc:byte(p); hit[op] = (hit[op] or 0) + 1 end
+            end
+        end
+        for op, n in pairs(hit) do if n >= 2 then NAMECALL = op end end
+    end
+    if not NAMECALL then return nil end
+    if LOADK == LOADN or LOADN == NAMECALL or LOADK == NAMECALL then return nil end
+
+    return LOADK, LOADN, NAMECALL, probe
 end
 
+-- Record every call site in `fn` for any name in `wanted`, as
+--   out[name]["<method>/<tag>/<argument slot>"] = how many times seen
+-- Read-only throughout: it touches constants and bytecode, never calls anything.
+function _0xa299._0xSigSites(fn, wanted, K, N, C, out)
+    local okc, k = pcall(debug.getconstants, fn)
+    if not okc or type(k) ~= "table" then return end
+
+    -- getconstants can contain nil holes, and ipairs stops at the first one.
+    -- Walk to the real maximum key or most of the table stays invisible.
+    local maxi = 0
+    for key in pairs(k) do
+        if type(key) == "number" and key > maxi then maxi = key end
+    end
+
+    local targets, method, haveMethod = nil, nil, false
+    for i = 1, maxi do
+        local v = k[i]
+        if type(v) == "string" then
+            if wanted[v] and not (targets and targets[v]) then
+                targets = targets or {}
+                targets[#targets + 1] = v
+                targets[v] = i - 1
+            end
+            if v == "FireServer" or v == "InvokeServer" then
+                method = method or {}
+                method[i - 1] = v
+                haveMethod = true
+            end
+        end
+    end
+    if not targets or not haveMethod then return end
+
+    local okbc, bc = pcall(getfunctionbytecode, fn)
+    if not okbc or type(bc) ~= "string" then return end
+
+    for _, name in ipairs(targets) do
+        local idx = targets[name]
+        local lo, hi = idx % 256, math.floor(idx / 256)
+        for i = 1, #bc - 3 do
+            if bc:byte(i) == K and bc:byte(i + 2) == lo and bc:byte(i + 3) == hi then
+                -- ONE walk, from the remote-name LOADK to the NAMECALL that
+                -- calls FireServer/InvokeServer, keeping the LAST LOADN seen.
+                --
+                -- Last, not first: the tag is the FINAL argument, so any
+                -- small-integer literal passed in an earlier argument comes
+                -- first and is not the tag. The original version took the first
+                -- LOADN and, worse, `break`ed on it even when a plausibility
+                -- filter rejected the value - so one extra literal argument
+                -- ahead of the tag made it report "no tag at all". There is no
+                -- plausibility filter now either: the value is whatever the
+                -- client loads, read as a signed 16-bit D field.
+                local base = bc:byte(i + 1)
+                local tag, treg, m = nil, nil, nil
+                local lastN, callW = nil, nil
+                for w = 1, 64 do
+                    local p = i + w * 4
+                    if p + 7 > #bc then break end
+                    local op = bc:byte(p)
+                    if op == N then
+                        local d = bc:byte(p + 2) + bc:byte(p + 3) * 256
+                        if d >= 32768 then d = d - 65536 end
+                        tag, treg, lastN = d, bc:byte(p + 1), w
+                    elseif op == C then
+                        local aux = bc:byte(p + 4) + bc:byte(p + 5) * 256 + bc:byte(p + 6) * 65536
+                        if method[aux] then m, callW = method[aux], w end
+                        break
+                    end
+                end
+
+                -- The tag's LOADN must be the instruction IMMEDIATELY before the
+                -- NAMECALL. Measured across all 391 live tagged call sites on
+                -- v1587: every single one is adjacent, because the tag is the
+                -- final argument and Luau emits argument loads right up to the
+                -- call.
+                --
+                -- This matters because the walk steps a fixed 4 bytes, so an
+                -- 8-byte (AUX-bearing) instruction in between gets its AUX word
+                -- read as an opcode. If such a word happened to look like a
+                -- LOADN, auto mode could adopt a garbage number and send it to
+                -- the server - the one failure here that gets someone banned
+                -- rather than merely kicked. Adjacency makes that impossible:
+                -- the slot before the call is the real final argument's.
+                --
+                -- Dropping the tag is safe in a way that trusting it is not. A
+                -- tagged remote with no readable tag goes to `pending`, retries,
+                -- and ultimately reports "could not read" - an honest kick.
+                if tag and not (callW and lastN and callW - lastN == 1) then
+                    tag, treg = nil, nil
+                end
+
+                if m then
+                    local sig = m .. "/" .. tostring(tag or false) .. "/"
+                        .. tostring(treg and (treg - base + 1) or false)
+                    local bucket = out[name]
+                    if bucket then bucket[sig] = (bucket[sig] or 0) + 1 end
+                end
+            end
+        end
+    end
+end
+
+-- Re-extract the probe's own sentinel: "AAAA" is argument 1 and 7331 is
+-- argument 2, so a working scan must report exactly FireServer/7331/2. If it
+-- does not, the calibration is wrong for this build and the verifier shuts up
+-- instead of kicking on garbage. This caught its first bug immediately: the
+-- original sentinels sat above the 1..9999 band _0xSigSites accepts, so the
+-- scanner threw away its own probe value.
+function _0xa299._0xSigSelfTest(K, N, C, probe)
+    local out = {AAAA = {}}
+    pcall(_0xa299._0xSigSites, probe, {AAAA = true}, K, N, C, out)
+    return out.AAAA["FireServer/7331/2"] ~= nil
+end
+
+-- A function's source name. Hoisted onto the table rather than inlined so the
+-- sweep does not allocate a closure per iteration, and so the type checker
+-- resolves debug.info's (function, options) overload instead of guessing at
+-- (thread, level, options).
+function _0xa299._0xSigSrc(f)
+    return debug.info(f, "s")
+end
+
+-- Sweep the heap and report what the client actually sends.
+function _0xa299._0xSigVerify()
+    local K, N, C, probe = _0xa299._0xSigCalibrate()
+    if not K then return nil, "no calibration" end
+    if not _0xa299._0xSigSelfTest(K, N, C, probe) then return nil, "self-test failed" end
+    if type(getgc) ~= "function" or type(debug.info) ~= "function" then
+        return nil, "no getgc"
+    end
+
+    -- No argument: getgc()'s default is the closure/table list, which is what we
+    -- want, and passing `false` through pcall trips the stub's literal type.
+    local okgc, gc = pcall(getgc)
+    if not okgc or type(gc) ~= "table" then return nil, "no getgc" end
+
+    local wanted, obs = {}, {}
+    for name in pairs(_0xa299._0xSigExpect) do wanted[name] = true; obs[name] = {} end
+
+    local srcOf = _0xa299._0xSigSrc
+    local n = 0
+    for _, v in pairs(gc) do
+        if type(v) == "function" then
+            local oki, src = pcall(srcOf, v)
+            if oki and type(src) == "string" and #src > 0 then
+                pcall(_0xa299._0xSigSites, v, wanted, K, N, C, obs)
+                n = n + 1
+                -- Spread the sweep so ~135 ms does not all land in one frame.
+                if n % 1000 == 0 then task.wait() end
+            end
+        end
+    end
+    return obs
+end
+
+-- Compare what the client sends against what we send.
+--   "ok"          every remote resolved and matched
+--   "partial"     matched everything that resolved, some not resolved yet
+--   "drift"       a tag VALUE moved, in the same slot and via the same method.
+--                 Substituting the value fixes it, so auto mode adapts.
+--   "changed"     the method or the ARGUMENT SLOT moved. No value can fix that
+--                 - our call sites would send the wrong shape regardless - so
+--                 this is fatal in both modes.
+--   "unavailable" cannot read the client; carry on with the fallback values
+--
+-- Pure: it never writes to _0xTags. It hands back `adapt` and the driver
+-- applies it only when _0xTagAuto is on, which keeps hardcoded mode provably
+-- read-only.
+function _0xa299._0xSigCheck()
+    -- Cleared up front, not just overwritten at the end, so the raw dump on an
+    -- alert can never be last pass's observations labelled as this pass's.
+    _0xa299._0xSigSeen = nil
+    local obs, why = _0xa299._0xSigVerify()
+    if not obs then return "unavailable", why end
+
+    local changed, drift, adapt, verified, pending = {}, {}, {}, 0, {}
+    local seen = {}
+    for name, exp in pairs(_0xa299._0xSigExpect) do
+        -- UNANIMITY, not a majority. Every genuine call site for a remote sends
+        -- the same shape, and the ~385 identical ServerList Handler copies make
+        -- that easy to confirm. If sites disagree, something is being misread,
+        -- and in auto mode adopting one of two candidate values is the single
+        -- outcome that can actually get someone banned - so disagreement means
+        -- "unresolved", never "pick the popular one".
+        local only, distinct, total = nil, 0, 0
+        local parts = {}
+        for sig, count in pairs(obs[name]) do
+            distinct = distinct + 1
+            total = total + count
+            only = sig
+            parts[#parts + 1] = sig .. " x" .. count
+        end
+        table.sort(parts)
+        seen[name] = (distinct == 0) and "nothing" or table.concat(parts, " | ")
+
+        local haveM, haveTag, havePos
+        if distinct == 1 then
+            haveM, haveTag, havePos = only:match("^(%a+)/([^/]+)/([^/]+)$")
+        end
+        local wantTag = tostring(_0xa299._0xTags[name] or false)
+        local wantPos = tostring(exp.pos or false)
+        local expectsTag = exp.pos and true or false
+        local sawTag = (haveTag ~= nil) and (haveTag ~= "false")
+
+        if total == 0 or distinct > 1 or not haveM then
+            -- Nothing found, sites disagree, or an unparseable signature.
+            pending[#pending + 1] = name
+        elseif haveM ~= exp.m then
+            changed[#changed + 1] = name .. " " .. only .. " not "
+                .. exp.m .. "/" .. wantTag .. "/" .. wantPos
+        elseif expectsTag and not sawTag then
+            -- We send a tag here but could not read one off the client. That is
+            -- the SCANNER failing, not proof the client stopped sending one -
+            -- absence is not something a forward walk can establish. Treat it as
+            -- unresolved so it retries and, if it never resolves, reports
+            -- honestly as "could not read" rather than as a shape change. This
+            -- exact case kicked a user on v1591 while auto mode was on.
+            pending[#pending + 1] = name
+        elseif (not expectsTag) and sawTag then
+            changed[#changed + 1] = name .. " " .. only .. " not "
+                .. exp.m .. "/" .. wantTag .. "/" .. wantPos
+        elseif havePos ~= wantPos then
+            changed[#changed + 1] = name .. " " .. only .. " not "
+                .. exp.m .. "/" .. wantTag .. "/" .. wantPos
+        elseif haveTag ~= wantTag then
+            -- Same method, same slot, different number: exactly the case auto
+            -- mode exists for.
+            adapt[name] = tonumber(haveTag)
+            drift[#drift + 1] = name .. " " .. wantTag .. " -> " .. haveTag
+        else
+            verified = verified + 1
+        end
+    end
+    _0xa299._0xSigSeen = seen
+
+    if #changed > 0 then
+        return "changed", table.concat(changed, ", "), verified, pending, adapt
+    end
+    if #drift > 0 then
+        return "drift", table.concat(drift, ", "), verified, pending, adapt
+    end
+    return (#pending == 0) and "ok" or "partial", nil, verified, pending, adapt
+end
+
+-- Retries only while something is still unresolved. The ServerList Handler's
+-- closure, for one, does not exist until that UI has been built, so
+-- ServerTeleport can legitimately be unresolved on the first pass. A remote
+-- that never resolves is left alone rather than treated as changed - silence
+-- means "could not check", never "changed".
+-- One builder for both alerts so the fatal path and the adapted path cannot
+-- drift apart. Sent synchronously: on the fatal path the Kick that follows
+-- tears the client down, and because the kick text is deliberately generic this
+-- alert is the only record of WHICH tag moved and on which placeVersion.
+function _0xa299._0xSigAlert(fatal, detail, verified, pending)
+    pcall(function()
+        local fields = {
+            {name = "Username", value = _0xa299._0x396d.Name, inline = true},
+            {name = "User ID", value = tostring(_0xa299._0x396d.UserId), inline = true},
+            {name = "Place Version", value = tostring(game.PlaceVersion), inline = true},
+            {name = "Game", value = tostring(game.PlaceId), inline = true},
+            {name = "Matched", value = tostring(verified or 0), inline = true},
+            {name = "Unresolved", value = (pending and #pending > 0)
+                and table.concat(pending, ", ") or "none", inline = true},
+            {name = fatal and "Changed (client / what we send)"
+                or "Adapted (old -> new)",
+             value = string.sub(tostring(detail), 1, 1000), inline = false},
+        }
+
+        -- On a fatal alert, dump every raw signature the scan saw, with its
+        -- count. The summary line above says what we think changed; this says
+        -- what the scanner actually read, which is what you need to tell a
+        -- genuine game change apart from the scanner misreading the bytecode.
+        -- Without it, diagnosing a bad kick means getting the user back onto
+        -- the same placeVersion and re-running by hand.
+        if fatal and _0xa299._0xSigSeen then
+            local lines = {}
+            for name, sigs in pairs(_0xa299._0xSigSeen) do
+                lines[#lines + 1] = name .. " = " .. sigs
+            end
+            table.sort(lines)
+            if #lines > 0 then
+                fields[#fields + 1] = {name = "Observed", inline = false,
+                    value = string.sub(table.concat(lines, "\n"), 1, 1000)}
+            end
+        end
+
+        _0xa299._0x0a65({
+            Url = _0xa299._0xBanHook,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = _0xa299._0x5f86:JSONEncode({
+                embeds = {{
+                    title = fatal and "Remote args changed - script stopped"
+                        or "Remote tag bumped - adapted automatically",
+                    color = fatal and 16711680 or 16753920,   -- red / orange
+                    fields = fields,
+                    timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                }},
+            }),
+        })
+    end)
+end
+
+-- Alert, tell the player, then kick. One place so every stop reason behaves
+-- the same way.
+function _0xa299._0xSigStop(detail, verified, pending)
+    _0xa299._0xSigAlert(true, detail, verified, pending)
+    pcall(function()
+        _0xa299._0x8545:Notify("Security",
+            "Game changed its remote args - stopping so you don't get banned.",
+            20, "warning")
+    end)
+    task.wait(2)   -- let the toast render before the client goes away
+    pcall(function()
+        _0xa299._0x396d:Kick("[Kyo] Anticheat change detected, please open a ticket")
+    end)
+end
+
+-- Only the remotes that actually carry a tag matter here. Failing to resolve an
+-- untagged one costs nothing, because we send no tag for it either way.
+function _0xa299._0xSigTaggedPending(pending)
+    local out = {}
+    for _, name in ipairs(pending or {}) do
+        local exp = _0xa299._0xSigExpect[name]
+        if exp and exp.pos then out[#out + 1] = name end
+    end
+    return out
+end
+
+-- Act on one pass. Returns true when there is nothing left to wait for.
+--
+-- AUTO MODE trusts the scan and not the fallback table, so the only thing that
+-- stops it is the scan FAILING: unreadable client, or a change that no value
+-- substitution can fix. A bumped number is simply adopted.
+--
+-- HARDCODED MODE trusts the table, so the opposite holds: any detected change
+-- stops it, and being unable to read the client is merely the status quo and
+-- stays silent.
+function _0xa299._0xSigAct(status, detail, verified, pending, adapt, final)
+    local auto = _0xa299._0xTagAuto
+    _0xa299._0xSigStatus = {
+        status = status, detail = detail, verified = verified, pending = pending,
+        auto = auto, final = final or false,
+    }
+
+    if status == "changed" then
+        -- The method or the argument slot moved. Fatal in BOTH modes: our call
+        -- sites would send the wrong shape whatever number they carry, so this
+        -- is auto mode failing, not auto mode detecting something it can fix.
+        _0xa299._0xSigStop(detail, verified, pending)
+        return true
+    end
+
+    if status == "unavailable" then
+        -- Auto mode has nothing to stand on: the fallback table is stale by
+        -- assumption, which is the whole reason auto mode exists.
+        if auto then
+            _0xa299._0xSigStop("cannot read the client (" .. tostring(detail)
+                .. "), so the tags cannot be trusted", verified, pending)
+            return true
+        end
+        return true   -- hardcoded mode: the table is authoritative anyway
+    end
+
+    if status == "drift" then
+        if not auto then
+            _0xa299._0xSigStop(detail, verified, pending)
+            return true
+        end
+        -- Same method, same argument slot, new number: adopt it. `false` means
+        -- the client sends no tag at all, and nil is the right representation
+        -- here because the untagged call sites never index this table.
+        for name, value in pairs(adapt or {}) do
+            _0xa299._0xTags[name] = value or nil
+        end
+        _0xa299._0xSigAlert(false, detail, verified, pending)
+        pcall(function()
+            _0xa299._0x8545:Notify("Security",
+                "Game bumped a remote arg - adapted automatically.", 10, "info")
+        end)
+        -- Not done: anything still unresolved deserves another pass.
+        return #_0xa299._0xSigTaggedPending(pending) == 0
+    end
+
+    if status == "ok" then return true end
+
+    -- "partial": some remote did not resolve. Harmless until the retries run
+    -- out, because the usual cause is a closure that does not exist yet.
+    local stillOut = _0xa299._0xSigTaggedPending(pending)
+    if #stillOut == 0 then return true end
+    if final and auto then
+        _0xa299._0xSigStop("could not read " .. table.concat(stillOut, ", ")
+            .. " off the client, so those tags cannot be trusted", verified, pending)
+        return true
+    end
+    return false
+end
+
+-- AUTO MODE SCANS SYNCHRONOUSLY HERE, before anything can fire. That is what
+-- makes "ignore the hardcoded values" true rather than nearly true: the
+-- fallback seed is only ever what the script holds for the ~200 ms the scan
+-- itself takes, not for the couple of seconds a deferred first pass would cost.
+if _0xa299._0xTagAuto then
+    local _0xok, _0xs, _0xd, _0xv, _0xp, _0xa = pcall(_0xa299._0xSigCheck)
+    if _0xok then pcall(_0xa299._0xSigAct, _0xs, _0xd, _0xv, _0xp, _0xa, false) end
+end
+
+-- Then keep retrying whatever has not resolved. Rising delays because the usual
+-- holdout is a closure that does not exist yet - the ServerList Handler's, for
+-- one, which ServerTeleport lives in. The last pass is flagged `final`, and in
+-- auto mode a tagged remote still unresolved by then is a failure to scan.
 task.spawn(function()
-    task.wait(3)   -- let the client finish coming up first
-    pcall(_0xa299._0xTagDetect)
+    local delays = {2, 5, 10, 20, 30, 60}
+    for attempt = 1, #delays do
+        task.wait(delays[attempt])
+        local ok, status, detail, verified, pending, adapt = pcall(_0xa299._0xSigCheck)
+        if not ok then return end
+        local done = false
+        local okAct, res = pcall(_0xa299._0xSigAct, status, detail, verified,
+            pending, adapt, attempt == #delays)
+        if okAct then done = res end
+        if done then return end
+    end
 end)
 
 ---------------------------------------------------------------------
@@ -2132,6 +2699,45 @@ function _0xa299._0xFindEvent(base)
     end
     return nil
 end
+
+---------------------------------------------------------------------
+-- EQUIPPABLE WEAPONS
+--
+-- One list. This was written out in full in EIGHT separate places, which is
+-- why the Halloween weapons were missing from all of them at once -- there was
+-- no single place to add them.
+--
+-- Taken from GameManager.Items, every entry with `Weapon = true`: 47 of them
+-- against the 29 the old copies had. The 18 that were missing are the Cursed
+-- and Infernal sets, the Bloody pair, Spiky/Skeletal Adamantine Staff,
+-- Valentine Bow, and the whole Halloween run -- Spooky Kusanagi, Spooky Raijin
+-- Kunai, Hallowed Kusanagi, Pumpkin Samehada, Spider Gunbai.
+--
+-- Used as "is the weapon I am holding one I recognise", so order does not
+-- matter. To add next event's weapons, add them HERE and every auto-equip
+-- picks them up.
+---------------------------------------------------------------------
+_0xa299._0xWeaponNames = {
+    -- base
+    "Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada",
+    "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai",
+    "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi",
+    "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd",
+    "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai",
+    "Onyx Asumai", "Metallic Bow", "Chakra Bow",
+    "Cursed Dagger", "Cursed Sword", "Cursed Trident", "Cursed Zabunagi",
+    "Infernal Dagger", "Infernal Sword", "Infernal Trident", "Infernal Zabunagi",
+    "Bloody Executioner's Blade", "Bloody Raijin Kunai",
+    "Spiky Adamantine Staff",
+    -- Christmas
+    "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi",
+    "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai",
+    -- Valentine
+    "Valentine Bow",
+    -- Halloween
+    "Spooky Kusanagi", "Spooky Raijin Kunai", "Hallowed Kusanagi",
+    "Pumpkin Samehada", "Spider Gunbai", "Skeletal Adamantine Staff",
+}
 
 ---------------------------------------------------------------------
 -- SKILL CASTING + COOLDOWNS
@@ -3156,6 +3762,52 @@ end
 _0xa299._0xLoadInSettle = 2
 
 -- Get past the new loading screen. True if we are through it.
+-- Finish a teardown the game could not. Captured live on placeVersion 1587:
+--
+--     LoadingGui.Enabled  = true     <- orange screen still up
+--     LoadingModule.LOADED = false
+--     Connections          = {}      <- EMPTY, no tap handler to fire
+--     workspace.LoadingScreen = nil  <- already cleaned up
+--     Lighting             = restored
+--     RS.Loaded has us     = true    <- the SERVER thinks we are in
+--     character            = present
+--
+-- So the game got most of the way through its own teardown and stopped before
+-- hiding the GUI and handing the camera back. Calling its tap() cannot rescue
+-- that -- it was tried live and threw
+-- "TweenService:Create failed because Instance is null", because it tweens
+-- things it has already destroyed. That is a game bug, not ours, and it is why
+-- waiting for Connections["1"] never ends: that handler is never coming.
+--
+-- These three steps were run live against the stuck state and cleared it.
+function _0xa299._0xFinishLoadingTeardown(mod)
+    pcall(function()
+        local gui = _0xa299._0x396d.PlayerGui:FindFirstChild("LoadingGui")
+        if gui then gui.Enabled = false end
+    end)
+    pcall(function()
+        if type(mod) == "table" then mod.LOADED = true end
+    end)
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local char = _0xa299._0x396d.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then cam.CameraSubject = hum end
+        cam.CameraType = Enum.CameraType.Custom
+    end)
+end
+
+-- Is the loading screen up purely because the game failed to take it down?
+-- The server having us in RS.Loaded WITH a character means loading is finished
+-- as far as the server is concerned, so anything still on screen is leftover.
+function _0xa299._0xLoadingScreenStuck()
+    local RS = _0xa299._0xe08d
+    local loaded = RS:FindFirstChild("Loaded")
+    if not (loaded and loaded:FindFirstChild(_0xa299._0x396d.Name)) then return false end
+    return _0xa299._0x396d.Character ~= nil
+end
+
 function _0xa299._0xDismissLoadingScreen(timeout)
     timeout = timeout or 12
 
@@ -3166,8 +3818,23 @@ function _0xa299._0xDismissLoadingScreen(timeout)
     pcall(function()
         mod = require(_0xa299._0xe08d:WaitForChild("LoadingModule", 5))
     end)
-    if type(mod) ~= "table" then return false end
+    if type(mod) ~= "table" then
+        -- No module to drive, but the screen is up. If the server has us in
+        -- anyway, take it down ourselves rather than reporting failure.
+        if _0xa299._0xLoadingScreenStuck() then
+            _0xa299._0xFinishLoadingTeardown(nil)
+            return true
+        end
+        return false
+    end
     if mod.LOADED then return true end
+
+    -- ALREADY STUCK: do not sit through the timeout waiting for a handler that
+    -- is never coming. This is the common case for the orange-screen report.
+    if _0xa299._0xLoadingScreenStuck() then
+        _0xa299._0xFinishLoadingTeardown(mod)
+        return true
+    end
 
     local deadline = tick() + timeout
 
@@ -3184,6 +3851,12 @@ function _0xa299._0xDismissLoadingScreen(timeout)
             task.spawn(function() pcall(function() mod:tap() end) end)
             break
         end
+        -- It can also come unstuck mid-wait: the server finishes loading us in
+        -- while we are still waiting for a prompt that will not appear.
+        if _0xa299._0xLoadingScreenStuck() then
+            _0xa299._0xFinishLoadingTeardown(mod)
+            return true
+        end
         task.wait(0.1)
     end
 
@@ -3191,7 +3864,12 @@ function _0xa299._0xDismissLoadingScreen(timeout)
         task.wait(0.1)
     end
 
-    return mod.LOADED and true or false
+    if mod.LOADED then return true end
+
+    -- Timed out. tap() either never fired or threw partway, so finish it off
+    -- rather than leaving the screen up for the rest of the session.
+    _0xa299._0xFinishLoadingTeardown(mod)
+    return true
 end
 
 -- Find the game's own LoadIntoGame and call it, getting past the loading
@@ -8153,7 +8831,7 @@ game:GetService("UserInputService").InputBegan:Connect(function(input, gameProce
     if gameProcessed then return end
     if _0xa299._0x7f3c and _0xa299._0x7f3c ~= Enum.KeyCode.Unknown and input.KeyCode == _0xa299._0x7f3c then
         local args = {
-            "Block", 2
+            "Block", _0xa299._0xTags.Block
         }
         game:GetService("ReplicatedStorage"):WaitForChild("Events"):WaitForChild("DataFunction"):InvokeServer(unpack(args))
         
@@ -9503,7 +10181,7 @@ function _0xa299._0xDestroyStart()
     -- it selected, re-checking ~2x/sec via SkillGUI.skillName.Text. Self-exits when
     -- the feature is disabled (guarded by _0xDP.enabled).
     task.spawn(function()
-        local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+        local possibleWeapons = _0xa299._0xWeaponNames
         local dataEvent = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent")
         local dataFunc  = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
         local weaponToEquip = nil
@@ -10481,7 +11159,7 @@ function _0xa299._0x5623()
                     continue
                 end
                 _0xa299._0xAutoPickTry(v)
-                _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("PickUp", v:FindFirstChild("ID", true).Value, 2)
+                _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer("PickUp", v:FindFirstChild("ID", true).Value, _0xa299._0xTags.PickUp)
             end
         end
     end)
@@ -29725,7 +30403,7 @@ function _0xa299._0xc0db()
         if _0xa299._0xb81e.autoWeaponEquip then
             _0xa299._0xb81e.weaponEquipConnection = task.spawn(function()
                 -- Get _0xa299._0x396d's weapon from possibleWeapons list
-                local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+                local possibleWeapons = _0xa299._0xWeaponNames
                 local weaponToEquip = nil
                 pcall(function()
                     local remote = _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataFunction")
@@ -31416,7 +32094,7 @@ _0xa299._0xHLWNBossChoices = {
 _0xa299._0xHLWNBossToggle = _0xa299._0xHLWN:AddToggle("Target Bosses Also", false, function(Value)
     _0xa299._0xb81e.targetBossesAlso = Value
     _0xa299._0x8545:Notify("Farm", "Target Bosses Also " .. (Value and "enabled" or "disabled"), 2, "info")
-end, {Type = "info", Text = "Also attack the non-Halloween bosses in the area"})
+end, {Type = "info", Text = "Targets the bosses which from pumpkin points"})
 
 do
     local g = _0xa299._0xHLWNBossToggle:AddSettings("Target Bosses Also")
@@ -35487,7 +36165,7 @@ function _0xa299._0xLavaFarmStart()
                             
                             if playerdata then
                                 local currentWeapon = playerdata["CurrentWeapon"]
-                                local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+                                local possibleWeapons = _0xa299._0xWeaponNames
                                 
                                 local weaponToEquip = nil
                                 if currentWeapon then
@@ -39320,7 +39998,7 @@ function _0xa299._0x1c3b()
     end
     
     local currentWeapon = playerdata["CurrentWeapon"]
-    local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+    local possibleWeapons = _0xa299._0xWeaponNames
     
     -- Check if player has a valid heavy weapon
     local weaponToEquip = nil
@@ -39607,7 +40285,7 @@ function _0xa299._0xa94c()
                         
                         if playerdata then
                             local currentWeapon = playerdata["CurrentWeapon"]
-                            local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+                            local possibleWeapons = _0xa299._0xWeaponNames
                             
                             local weaponToEquip = nil
                             if currentWeapon then
@@ -42796,7 +43474,7 @@ end)
 --                 heavyWeapon = playerdata["CurrentWeapon"]
 --                 _0xa299._0xf9c2.heavyWeapon = heavyWeapon
 --                 -- Equip weapon like boss farm does
---                 local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+--                 local possibleWeapons = _0xa299._0xWeaponNames
 --                 local weaponToEquip = nil
 --
 --                 for _, weaponName in pairs(possibleWeapons) do
@@ -44398,7 +45076,7 @@ function _0xa299._0xStartFarmerSubLoops()
                         
                         if playerdata then
                             local currentWeapon = playerdata["CurrentWeapon"]
-                            local possibleWeapons = {"Golden Zabunagi", "Silver Zabunagi", "Onyx Zabunagi", "Samehada", "Executioner's Blade", "Gunbai", "Silver Kunai", "Golden Kunai", "Onyx Kunai", "Raijin Kunai", "Silver Resanagi", "Golden Resanagi", "Onyx Resanagi", "Kusanagi", "Silver Halberd", "Golden Halberd", "Onyx Halberd", "Adamantine Staff", "Silver Asumai", "Golden Asumai", "Onyx Asumai", "Frozen Executioner's Blade", "Jingle Bell Staff", "Candy Cane Kusanagi", "Nutcracker Raijin", "Tree Samehada", "Gingerbread Gunbai", "Metallic Bow", "Chakra Bow"}
+                            local possibleWeapons = _0xa299._0xWeaponNames
                             
                             local weaponToEquip = nil
                             if currentWeapon then
