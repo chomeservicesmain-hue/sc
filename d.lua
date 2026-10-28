@@ -1043,6 +1043,7 @@ _0xa299._0x5ea3 = _0xa299._0x23e7:AddLeftGroupbox('Auto Scalpel')
 _0xa299._0xcbab = _0xa299._0x23e7:AddRightGroupbox('Auto Extract Eyes')
 _0xa299._0x694e = _0xa299._0x23e7:AddLeftGroupbox('Tree Hopping')
 _0xa299._0xf4f7 = _0xa299._0x23e7:AddRightGroupbox('SwitchPowder Farm')
+_0xa299._0xGOLDB = _0xa299._0x23e7:AddRightGroupbox('Golden SwitchPowder Farm')
 _0xa299._0x2e7c = _0xa299._0x23e7:AddLeftGroupbox('Auto Bowl Maker')
 _0xa299._0xAFKA = _0xa299._0x23e7:AddRightGroupbox('AFK Age Ups')
 _0xa299._0xFRFM = _0xa299._0x23e7:AddLeftGroupbox('Chakra Fruit/Lifefruit Farm')
@@ -24856,6 +24857,15 @@ _0xa299._0xfba7 = function()
     _0xa299._0xb8d4.AspectRatio = 3.5
 end -- End of createBossUI function
 
+-- The switchpower_* HUD lines are shared by both powder farms, so the tag is
+-- passed in rather than hardcoded. Those actions never used the third argument
+-- for anything, and an empty one still reads SWITCHPOWDER, so the original
+-- farm's output is unchanged.
+function _0xa299._0xPowderTag(tag)
+    if type(tag) == "string" and tag ~= "" then return tag end
+    return "SWITCHPOWDER"
+end
+
 _0xa299._0xdc0f = function(action, name, health)
     _0xa299._0xfba7() -- Lazy create UI when needed
     if action == "disable" then
@@ -24887,28 +24897,28 @@ _0xa299._0xdc0f = function(action, name, health)
 		_0xa299._0x8509.Text = "[BOSS FARM]\nSpawning: " .. name
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(100, 200, 255)
 	elseif action == "switchpower_spawning" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nSpawning NPC's"
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nSpawning NPC's"
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(138, 43, 226)
 	elseif action == "switchpower_farming" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nFarming " .. name
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nFarming " .. name
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(255, 100, 100)
 	elseif action == "switchpower_collecting" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nCollecting Powder"
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nCollecting Powder"
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(100, 255, 100)
 	elseif action == "switchpower_waiting" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nNo NPC's Found\nWaiting " .. name .. "s"
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nNo NPC's Found\nWaiting " .. name .. "s"
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(255, 255, 100)
 	elseif action == "switchpower_hopping" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nServer Hopping"
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nServer Hopping"
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(100, 200, 255)
 	elseif action == "switchpower_hiding" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nChakra sense detected\nHiding"
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nChakra sense detected\nHiding"
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(255, 100, 100)
 	elseif action == "switchpower_player_detected" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nPlayer nearby: " .. name .. "\nServer Hopping..."
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nPlayer nearby: " .. name .. "\nServer Hopping..."
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(255, 100, 100)
 	elseif action == "switchpower_low_hp" then
-		_0xa299._0x8509.Text = "[SWITCHPOWDER]\nLow HP, Healing"
+		_0xa299._0x8509.Text = "[" .. _0xa299._0xPowderTag(health) .. "]\nLow HP, Healing"
 		_0xa299._0x8509.TextColor3 = Color3.fromRGB(255, 150, 50)
 	elseif action == "killingnpcs" then
 		_0xa299._0x8509.Text = "[BOSS] Killing NPC's First\nNPC's " .. name
@@ -27266,8 +27276,73 @@ _0xa299._0xe2ce = {
 -- NPC offset for farming (height above NPC)
 _0xa299._0xb0b2 = 6.5
 
+---------------------------------------------------------------------
+-- THE TWO POWDER FARMS
+--
+-- Same engine, different numbers. Everything below this - proximity checks,
+-- chakra sense, low HP, server hopping, the kill pass and the collection - is
+-- shared, because the farms only genuinely differ in these six values and
+-- keeping two copies of 550 lines means fixing everything twice.
+--
+-- `activate` is the one real behavioural difference: the original fires
+-- ActivateSecretStepPlate at a floor it has to stream in, the golden one presses
+-- a Gaara parkour button, and they want different settle times.
+---------------------------------------------------------------------
+_0xa299._0xPowderFarms = {}
+
+_0xa299._0xPowderFarms.Standard = {
+    state = _0xa299._0xe2ce,
+    npc = "EventDesertoid",
+    item = "Switchpowder",
+    label = "SwitchPowder Farm",
+    tag = "SWITCHPOWDER",
+    spawnCFrame = CFrame.new(1904.79833984375, -402.0000915527344, 322.753662109375)
+        * CFrame.Angles(-0.025722, -0.011121, 0.000000),
+    -- Steps of 0.1s, so the interruption checks stay responsive.
+    settleSteps = 10,
+    activate = function()
+        local args = {
+            "ActivateSecretStepPlate",
+            _0xa299._0xWorldObject("DesortoidActivationFloor")
+        }
+        _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer(unpack(args, 1, 2))
+    end,
+}
+
+_0xa299._0xGolden = {
+    enabled = false,
+    connection = nil,
+    serverHopIfNoNPC = false,
+    hiding = false,
+    autoRerollTraits = false,
+    targetTraits = {},
+    stopIfTraitCount = 1,
+    rerollConnection = nil
+}
+
+_0xa299._0xPowderFarms.Golden = {
+    state = _0xa299._0xGolden,
+    npc = "Golden Desertoid",
+    item = "Golden Switchpowder",
+    label = "Golden SwitchPowder Farm",
+    tag = "GOLDEN POWDER",
+    spawnCFrame = CFrame.new(5267.4384765625, -118.56291961669922, 270.60589599609375),
+    -- 0.5s before the button press, as specified.
+    settleSteps = 5,
+    activate = function()
+        -- Indexed, not WaitForChild: the button is a static part of the parkour
+        -- course and we have just teleported on top of it, so if it is genuinely
+        -- absent that is worth surfacing as a pcall failure rather than hanging.
+        local args = {
+            "ActivateButton",
+            workspace.GaaraParkour.Buttons.GaaraButton4
+        }
+        _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer(unpack(args, 1, 2))
+    end,
+}
+
 -- Function to find and farm EventDesertoid NPCs
-function _0xa299._0x2834()
+function _0xa299._0x2834(cfg)
     local npcsFound = false
     local wasInterrupted = false
     
@@ -27294,7 +27369,7 @@ function _0xa299._0x2834()
     local totalNPCs = 0
     local npcsToFarm = {}
     for _, npc in pairs(workspace:GetChildren()) do
-        if npc.Name == "EventDesertoid" then
+        if npc.Name == cfg.npc then
             local humanoid = npc:FindFirstChildOfClass("Humanoid")
             if humanoid and humanoid.Health > 0 then
                 totalNPCs = totalNPCs + 1
@@ -27306,9 +27381,9 @@ function _0xa299._0x2834()
     local killedCount = 0
     
     for _, npc in pairs(npcsToFarm) do
-        if not _0xa299._0xe2ce.enabled then break end
+        if not cfg.state.enabled then break end
         
-        if npc.Name == "EventDesertoid" then
+        if npc.Name == cfg.npc then
             npcsFound = true
             local humanoid = npc:FindFirstChildOfClass("Humanoid")
             local hrpNPC = npc:FindFirstChild("HumanoidRootPart")
@@ -27321,7 +27396,7 @@ function _0xa299._0x2834()
                     -- Create M1 attack connection
                     local m1Count = 0
                     local m1Connection = _0xa299._0x64b8.Heartbeat:Connect(function(dt)
-                        if not _0xa299._0xe2ce.enabled then return end
+                        if not cfg.state.enabled then return end
                         m1Count = m1Count + dt
                         if m1Count > 0.1 then
                             m1Count = 0
@@ -27330,7 +27405,7 @@ function _0xa299._0x2834()
                     end)
                     
                     -- Teleport above NPC and attack
-                    while humanoid and humanoid.Health > 0 and _0xa299._0xe2ce.enabled do
+                    while humanoid and humanoid.Health > 0 and cfg.state.enabled do
                         -- Check if being observed by chakra sense (only if monitoring is on)
                         if _0xa299._0x6378 and _0xa299._0x2008 then
                             if m1Connection then m1Connection:Disconnect() end
@@ -27384,7 +27459,7 @@ function _0xa299._0x2834()
                     end
                     
                     killedCount = killedCount + 1
-                    if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_farming", killedCount .. "/" .. totalNPCs, "") end
+                    if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_farming", killedCount .. "/" .. totalNPCs, cfg.tag) end
                 end
             end
         end
@@ -27395,7 +27470,7 @@ function _0xa299._0x2834()
 end
 
 -- Function to collect SwitchPowder
-function _0xa299._0x76af()
+function _0xa299._0x76af(cfg)
     local char = _0xa299._0x396d.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
@@ -27404,13 +27479,13 @@ function _0xa299._0x76af()
     
     local powderObjects = {}
     for _, obj in pairs(workspace:GetDescendants()) do
-        if obj.Name == "Switchpowder" then
+        if obj.Name == cfg.item then
             table.insert(powderObjects, obj)
         end
     end
     
     for _, obj in pairs(powderObjects) do
-        if not _0xa299._0xe2ce.enabled then break end
+        if not cfg.state.enabled then break end
         if not obj or not obj.Parent then continue end
         
         -- Check for nearby players before collecting each powder
@@ -27427,7 +27502,7 @@ function _0xa299._0x76af()
                 end
             end
             if playerDetected then
-                _0xa299._0x8545:Notify("Farm", "SwitchPowder: Player nearby, stopping collection", 2, "warning")
+                _0xa299._0x8545:Notify("Farm", cfg.label .. ": Player nearby, stopping collection", 2, "warning")
                 return
             end
         end
@@ -27484,14 +27559,14 @@ function _0xa299._0x6da5()
 end
 
 -- Main SwitchPowder Farm loop
-function _0xa299._0xfb50()
+function _0xa299._0xfb50(cfg)
     -- Force load into game first
     _0xa299._0x6da5()
     
-    _0xa299._0xe2ce.connection = task.spawn(function()
+    cfg.state.connection = task.spawn(function()
         local switchPowerHiding = false
         
-        while _0xa299._0xe2ce.enabled do
+        while cfg.state.enabled do
             local char = _0xa299._0x396d.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             
@@ -27504,8 +27579,8 @@ function _0xa299._0xfb50()
             if _0xa299._0x6378 and _0xa299._0x2008 then
                 if not switchPowerHiding then
                     switchPowerHiding = true
-                    _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: Chakra sense detected, went to safespot", 3, "info")
-                    if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_hiding", "", "") end
+                    _0xa299._0x8545:Notify("Farm", cfg.label .. ": Chakra sense detected, went to safespot", 3, "info")
+                    if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_hiding", "", cfg.tag) end
                     
                     -- Apply spoof protection if enabled
                     if _0xa299._0x220a.spoofLoadingIn then
@@ -27515,34 +27590,34 @@ function _0xa299._0xfb50()
                 
                 hrp.CFrame = _0xa299._0xdde4()
                 
-                while _0xa299._0x6378 and _0xa299._0x2008 and _0xa299._0xe2ce.enabled do
+                while _0xa299._0x6378 and _0xa299._0x2008 and cfg.state.enabled do
                     task.wait(0.5)
                 end
                 
-                if not _0xa299._0xe2ce.enabled then break end
+                if not cfg.state.enabled then break end
                 
                 switchPowerHiding = false
                 -- Remove spoof protection when threat is gone
                 _0xa299._0x220a.removeSpoofProtection()
-                _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: No longer observed, back to farming", 3, "check")
+                _0xa299._0x8545:Notify("Farm", cfg.label .. ": No longer observed, back to farming", 3, "check")
                 continue
             end
             
             -- Check if HP is below 30%
             local humanoid = char:FindFirstChildOfClass("Humanoid")
             if humanoid and humanoid.Health / humanoid.MaxHealth < 0.3 then
-                _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: Low HP, went to safespot until healed", 3, "info")
-                if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_low_hp", "", "") end
+                _0xa299._0x8545:Notify("Farm", cfg.label .. ": Low HP, went to safespot until healed", 3, "info")
+                if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_low_hp", "", cfg.tag) end
                 
                 hrp.CFrame = _0xa299._0xdde4()
                 
-                while humanoid and humanoid.Health / humanoid.MaxHealth < 0.3 and _0xa299._0xe2ce.enabled do
+                while humanoid and humanoid.Health / humanoid.MaxHealth < 0.3 and cfg.state.enabled do
                     task.wait(0.5)
                 end
                 
-                if not _0xa299._0xe2ce.enabled then break end
+                if not cfg.state.enabled then break end
                 
-                _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: HP recovered, back to farming", 3, "check")
+                _0xa299._0x8545:Notify("Farm", cfg.label .. ": HP recovered, back to farming", 3, "check")
                 continue
             end
             
@@ -27563,10 +27638,10 @@ function _0xa299._0xfb50()
                 if #nearbyPlayers > 0 then
                     local playerNames = table.concat(nearbyPlayers, ", ")
                     
-                    if _0xa299._0xe2ce.serverHopIfNoNPC then
+                    if cfg.state.serverHopIfNoNPC then
                         -- Server hop if that option is enabled
-                        _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: Player nearby (" .. playerNames .. ") - Server hopping", 3, "info")
-                        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_player_detected", playerNames, "") end
+                        _0xa299._0x8545:Notify("Farm", cfg.label .. ": Player nearby (" .. playerNames .. ") - Server hopping", 3, "info")
+                        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_player_detected", playerNames, cfg.tag) end
                         
                         hrp.CFrame = _0xa299._0xdde4()
                         task.wait(1)
@@ -27575,13 +27650,13 @@ function _0xa299._0xfb50()
                         break
                     else
                         -- Pause and hide at safespot until players leave
-                        _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: Player nearby (" .. playerNames .. ") - Hiding", 3, "warning")
-                        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_hiding", playerNames, "") end
+                        _0xa299._0x8545:Notify("Farm", cfg.label .. ": Player nearby (" .. playerNames .. ") - Hiding", 3, "warning")
+                        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_hiding", playerNames, cfg.tag) end
                         
                         hrp.CFrame = _0xa299._0xdde4()
                         
                         -- Wait until no players are within range
-                        while _0xa299._0xe2ce.enabled do
+                        while cfg.state.enabled do
                             task.wait(0.5)
                             local stillNearby = false
                             for _, otherPlayer in ipairs(_0xa299._0x71bb:GetPlayers()) do
@@ -27604,19 +27679,18 @@ function _0xa299._0xfb50()
                             end)
                         end
                         
-                        if not _0xa299._0xe2ce.enabled then break end
-                        _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: Danger Gone, back to farming", 3, "check")
+                        if not cfg.state.enabled then break end
+                        _0xa299._0x8545:Notify("Farm", cfg.label .. ": Danger Gone, back to farming", 3, "check")
                         continue
                     end
                 end
             end
             
-            -- Step 1: Teleport to activation location.
-            -- Position updated 2026-10-25 (user-supplied). The small angle is
-            -- kept from the original capture - it is barely off level and only
-            -- there so the stance does not look machine-perfect.
-            if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_spawning", "", "") end
-            hrp.CFrame = CFrame.new(1904.79833984375, -402.0000915527344, 322.753662109375) * CFrame.Angles(-0.025722, -0.011121, 0.000000)
+            -- Step 1: Teleport to activation location. Per farm now, see
+            -- _0xa299._0xPowderFarms - the standard one's slight angle is from
+            -- the original capture and is kept there.
+            if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_spawning", "", cfg.tag) end
+            hrp.CFrame = cfg.spawnCFrame
             
             -- Step 2: Anchor _0xa299._0x396d
             local bv = Instance.new("BodyVelocity")
@@ -27629,8 +27703,8 @@ function _0xa299._0xfb50()
             
             -- Check for chakra sense and nearby players during spawn wait
             local spawnInterrupted = false
-            for i = 1, 10 do -- 1 second wait with checks every 0.1s
-                if not _0xa299._0xe2ce.enabled then
+            for i = 1, cfg.settleSteps do -- 0.1s per step, so the checks stay responsive
+                if not cfg.state.enabled then
                     spawnInterrupted = true
                     break
                 end
@@ -27658,22 +27732,17 @@ function _0xa299._0xfb50()
             if spawnInterrupted then
                 if bv and bv.Parent then bv:Destroy() end
                 hrp.CFrame = _0xa299._0xdde4()
-                if not _0xa299._0xe2ce.enabled then break end
+                if not cfg.state.enabled then break end
                 continue
             end
             
-            -- Step 3: Fire activation event
-            pcall(function()
-                local args = {
-                    "ActivateSecretStepPlate",
-                    _0xa299._0xWorldObject("DesortoidActivationFloor")
-                }
-                _0xa299._0xe08d:WaitForChild("Events"):WaitForChild("DataEvent"):FireServer(unpack(args))
-            end)
+            -- Step 3: Fire activation event. Which event, and against what,
+            -- is the one real difference between the two powder farms.
+            pcall(cfg.activate)
             
             -- Check for chakra sense and nearby players during post-activation wait
             for i = 1, 10 do -- 1 second wait with checks every 0.1s
-                if not _0xa299._0xe2ce.enabled then
+                if not cfg.state.enabled then
                     spawnInterrupted = true
                     break
                 end
@@ -27702,14 +27771,14 @@ function _0xa299._0xfb50()
             
             if spawnInterrupted then
                 hrp.CFrame = _0xa299._0xdde4()
-                if not _0xa299._0xe2ce.enabled then break end
+                if not cfg.state.enabled then break end
                 continue
             end
             
             -- Step 4: Check for EventDesertoid NPCs
             local foundNPCs = false
             for _, npc in pairs(workspace:GetChildren()) do
-                if npc.Name == "EventDesertoid" then
+                if npc.Name == cfg.npc then
                     local humanoid = npc:FindFirstChildOfClass("Humanoid")
                     if humanoid and humanoid.Health > 0 then
                         foundNPCs = true
@@ -27719,10 +27788,10 @@ function _0xa299._0xfb50()
             end
             
             if not foundNPCs then
-                _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm: No NPCs found", 3, "info")
+                _0xa299._0x8545:Notify("Farm", cfg.label .. ": No NPCs found", 3, "info")
                 
-                if _0xa299._0xe2ce.serverHopIfNoNPC then
-                    if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_hopping", "", "") end
+                if cfg.state.serverHopIfNoNPC then
+                    if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_hopping", "", cfg.tag) end
                     hrp.CFrame = _0xa299._0xdde4()
                     task.wait(1)
                     _0xa299._0xb5ef()
@@ -27731,8 +27800,8 @@ function _0xa299._0xfb50()
                     -- Teleport to safespot and wait 30 seconds before retrying
                     hrp.CFrame = _0xa299._0xdde4()
                     for i = 30, 1, -1 do
-                        if not _0xa299._0xe2ce.enabled then break end
-                        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_waiting", tostring(i), "") end
+                        if not cfg.state.enabled then break end
+                        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_waiting", tostring(i), cfg.tag) end
                         task.wait(1)
                     end
                     continue
@@ -27743,17 +27812,17 @@ function _0xa299._0xfb50()
             -- Count total NPCs
             local totalNPCs = 0
             for _, npc in pairs(workspace:GetChildren()) do
-                if npc.Name == "EventDesertoid" then
+                if npc.Name == cfg.npc then
                     local humanoid = npc:FindFirstChildOfClass("Humanoid")
                     if humanoid and humanoid.Health > 0 then
                         totalNPCs = totalNPCs + 1
                     end
                 end
             end
-            if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_farming", "0/" .. totalNPCs, "") end
-            local wasInterrupted, _ = _0xa299._0x2834()
+            if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_farming", "0/" .. totalNPCs, cfg.tag) end
+            local wasInterrupted, _ = _0xa299._0x2834(cfg)
             
-            if not _0xa299._0xe2ce.enabled then break end
+            if not cfg.state.enabled then break end
             
             if wasInterrupted then
                 hrp.CFrame = _0xa299._0xdde4()
@@ -27761,13 +27830,13 @@ function _0xa299._0xfb50()
             end
             
             -- Step 6: Wait for SwitchPowder to spawn
-            if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_collecting", "", "") end
+            if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_collecting", "", cfg.tag) end
             task.wait(3)
             
             -- Step 7: Collect all SwitchPowder
-            _0xa299._0x76af()
+            _0xa299._0x76af(cfg)
             
-            if not _0xa299._0xe2ce.enabled then break end
+            if not cfg.state.enabled then break end
             
             -- Step 8: Teleport to safespot
             hrp.CFrame = _0xa299._0xdde4()
@@ -27777,19 +27846,25 @@ function _0xa299._0xfb50()
     end)
 end
 
-function _0xa299._0x49c3()
-    _0xa299._0xe2ce.enabled = false
+function _0xa299._0x49c3(cfg)
+    cfg.state.enabled = false
     
-    if _0xa299._0xe2ce.connection then
-        task.cancel(_0xa299._0xe2ce.connection)
-        _0xa299._0xe2ce.connection = nil
+    if cfg.state.connection then
+        task.cancel(cfg.state.connection)
+        cfg.state.connection = nil
     end
     
     -- Remove any BodyVelocity that might be left
     pcall(function()
         local char = _0xa299._0x396d.Character
         if char and char:FindFirstChild("HumanoidRootPart") then
-            local bv = char.HumanoidRootPart:FindFirstChild("BodyVelocity")
+            -- "DirectionalBV" is what the farm actually creates - the name is
+            -- off the game's own allowlist, because a default-named BodyVelocity
+            -- on the HRP self-reports BanMe Offense 1E. This looked for
+            -- "BodyVelocity" and so never found it, leaving the anchor attached
+            -- and the character floating after a mid-spawn stop.
+            local bv = char.HumanoidRootPart:FindFirstChild("DirectionalBV")
+                or char.HumanoidRootPart:FindFirstChild("BodyVelocity")
             if bv then bv:Destroy() end
         end
     end)
@@ -27805,11 +27880,13 @@ _0xa299._0xe2ce.toggle = _0xa299._0xf4f7:AddToggle("Enable SwitchPowder Farm", f
     _0xa299._0xWM.set("FarmPowder", Value)
     _0xa299._0xe2ce.enabled = Value
     if Value then
-        if _0xa299._0xdc0f then _0xa299._0xdc0f("switchpower_spawning", "", "") end
-        _0xa299._0xfb50()
+        if _0xa299._0xdc0f then
+            _0xa299._0xdc0f("switchpower_spawning", "", _0xa299._0xPowderFarms.Standard.tag)
+        end
+        _0xa299._0xfb50(_0xa299._0xPowderFarms.Standard)
         _0xa299._0x8545:Notify("Farm", "SwitchPowder Farm enabled", 3, "check")
     else
-        _0xa299._0x49c3()
+        _0xa299._0x49c3(_0xa299._0xPowderFarms.Standard)
         if not _0xa299._0x6905 and not _0xa299._0x8545._isLoadingConfig then
             pcall(function()
                 local char = _0xa299._0x396d.Character
@@ -27825,6 +27902,47 @@ end)
 
 _0xa299._0xe2ce.toggle:AddSettings("SwitchPowder Farm"):AddToggle("Server Hop If No NPC", false, function(Value)
     _0xa299._0xe2ce.serverHopIfNoNPC = Value
+    _0xa299._0x8545:Notify("Farm", "Server Hop If No NPC " .. (Value and "enabled" or "disabled"), 3, Value and "check" or "info")
+end)
+
+---------------------------------------------------------------------
+-- GOLDEN SWITCHPOWDER FARM
+--
+-- Same engine as above, driven by _0xa299._0xPowderFarms.Golden: Golden
+-- Desertoid instead of EventDesertoid, Golden Switchpowder instead of
+-- Switchpowder, its own spawn point, and a Gaara parkour button to press rather
+-- than a step plate to activate.
+--
+-- Deliberately a separate toggle and a separate state table rather than a mode
+-- switch on the first farm: both can be left configured, and turning one on does
+-- not disturb the other's settings.
+---------------------------------------------------------------------
+_0xa299._0xGolden.toggle = _0xa299._0xGOLDB:AddToggle("Enable Golden SwitchPowder Farm", false, function(Value)
+    _0xa299._0xWM.set("FarmPowderGolden", Value)
+    _0xa299._0xGolden.enabled = Value
+    if Value then
+        if _0xa299._0xdc0f then
+            _0xa299._0xdc0f("switchpower_spawning", "", _0xa299._0xPowderFarms.Golden.tag)
+        end
+        _0xa299._0xfb50(_0xa299._0xPowderFarms.Golden)
+        _0xa299._0x8545:Notify("Farm", "Golden SwitchPowder Farm enabled", 3, "check")
+    else
+        _0xa299._0x49c3(_0xa299._0xPowderFarms.Golden)
+        if not _0xa299._0x6905 and not _0xa299._0x8545._isLoadingConfig then
+            pcall(function()
+                local char = _0xa299._0x396d.Character
+                if char and char:FindFirstChild("HumanoidRootPart") then
+                    char.HumanoidRootPart.CFrame = _0xa299._0xdde4()
+                end
+            end)
+        end
+        if _0xa299._0xdc0f then _0xa299._0xdc0f("disable", "", "") end
+        _0xa299._0x8545:Notify("Farm", "Golden SwitchPowder Farm disabled", 3, "info")
+    end
+end, {Flag = "FarmPowderGolden", Type = "info", Text = "Farms Golden Desertoids for Golden Switchpowder"})
+
+_0xa299._0xGolden.toggle:AddSettings("Golden SwitchPowder Farm"):AddToggle("Server Hop If No NPC", false, function(Value)
+    _0xa299._0xGolden.serverHopIfNoNPC = Value
     _0xa299._0x8545:Notify("Farm", "Server Hop If No NPC " .. (Value and "enabled" or "disabled"), 3, Value and "check" or "info")
 end)
 
