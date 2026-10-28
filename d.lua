@@ -2255,8 +2255,12 @@ function _0xa299._0xSigAlert(fatal, detail, verified, pending)
             Headers = {["Content-Type"] = "application/json"},
             Body = _0xa299._0x5f86:JSONEncode({
                 embeds = {{
-                    title = fatal and "Remote args changed - script stopped"
-                        or "Remote tag bumped - adapted automatically",
+                    -- Mirrors the kick the player saw, so a ticket quoting it
+                    -- lands you on the right alert without reading the detail.
+                    title = (not fatal) and "Remote tag bumped - adapted automatically"
+                        or (_0xa299._0xTagAuto
+                            and "Remote arg auto-update FAILED - script stopped"
+                            or "Remote args changed - script stopped"),
                     color = fatal and 16711680 or 16753920,   -- red / orange
                     fields = fields,
                     timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -2268,16 +2272,31 @@ end
 
 -- Alert, tell the player, then kick. One place so every stop reason behaves
 -- the same way.
+--
+-- THE MODE PICKS THE MESSAGE, not the specific reason, because the two modes
+-- stop for opposite causes and the player only needs to know which:
+--
+--   auto on  - every stop here is the auto-update FAILING. That covers a client
+--              it cannot read, a tagged remote that never resolves, and a moved
+--              method or argument slot (auto cannot fix a shape change by
+--              substituting a value, so that is a failure too, not a find).
+--   auto off - every stop here is a change DETECTED against the hardcoded
+--              table, which is exactly what hardcoded mode is for.
 function _0xa299._0xSigStop(detail, verified, pending)
+    local auto = _0xa299._0xTagAuto
     _0xa299._0xSigAlert(true, detail, verified, pending)
     pcall(function()
+        -- One line for both modes on purpose. The player's only useful action is
+        -- the same either way - wait for a script update - and which mode they
+        -- were in is already in the kick text and the webhook title.
         _0xa299._0x8545:Notify("Security",
-            "Game changed its remote args - stopping so you don't get banned.",
-            20, "warning")
+            "AC update detected, please wait for new update.", 20, "warning")
     end)
     task.wait(2)   -- let the toast render before the client goes away
     pcall(function()
-        _0xa299._0x396d:Kick("[Kyo] Anticheat change detected, please open a ticket")
+        _0xa299._0x396d:Kick(auto
+            and "[Kyo] A fatal error occurred while bypassing Anticheat, please open a ticket."
+            or "[Kyo] Anticheat change detected, please open a ticket")
     end)
 end
 
@@ -2340,8 +2359,11 @@ function _0xa299._0xSigAct(status, detail, verified, pending, adapt, final)
         end
         _0xa299._0xSigAlert(false, detail, verified, pending)
         pcall(function()
+            -- Says nothing about remote arguments. Everything a customer sees
+            -- from this verifier talks only about "Anticheat"; the mechanism
+            -- stays in the comments and in the webhook, which is ours.
             _0xa299._0x8545:Notify("Security",
-                "Game bumped a remote arg - adapted automatically.", 10, "info")
+                "Anticheat updated successfully", 10, "info")
         end)
         -- Not done: anything still unresolved deserves another pass.
         return #_0xa299._0xSigTaggedPending(pending) == 0
