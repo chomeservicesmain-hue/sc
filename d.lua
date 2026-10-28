@@ -27326,7 +27326,7 @@ _0xa299._0xPowderFarms.Golden = {
     item = "Golden Switchpowder",
     label = "Golden SwitchPowder Farm",
     tag = "GOLDEN POWDER",
-    spawnCFrame = CFrame.new(5267.4384765625, -118.56291961669922, 270.60589599609375),
+    spawnCFrame = CFrame.new(5279.2685546875, -147.6545867919922, 271.9684143066406),
     -- 0.5s before the button press, as specified.
     settleSteps = 5,
     activate = function()
