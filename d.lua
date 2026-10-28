@@ -3918,6 +3918,91 @@ _0xa299._0xLoadInFn = nil
 -- HEARTBEAT, so without this every frame started another one.
 _0xa299._0xLoadInBusy = false
 
+---------------------------------------------------------------------
+-- SHED A SPAWN FORCEFIELD
+--
+-- A rejoin, a force-load or a respawn hands us a ForceField, and it BLOCKS HP
+-- REGENERATION. Any farm that reacts to low HP by pinning the character to a
+-- safespot every frame therefore deadlocks under one: HP cannot climb while the
+-- shield is up, so the hide never ends, and the pin is itself what stops the
+-- shield clearing - it comes off on LANDING, and re-pinning every frame
+-- prevents the fall.
+--
+-- So this is not "wait it out", it is "get rid of it", and it has to run BEFORE
+-- any low-HP hide rather than after.
+--
+-- `stillOn` is a predicate - the calling farm's enabled flag - checked at every
+-- wait, so turning the farm off escapes immediately. No timeout on purpose: a
+-- farm that gives up here just returns to the deadlock.
+--
+-- Lifted from the awakening farm (_0x251c), which has it written out inline.
+---------------------------------------------------------------------
+function _0xa299._0xShedForcefield(stillOn)
+    stillOn = stillOn or function() return true end
+
+    while stillOn() do
+        local char = _0xa299._0x396d.Character
+        if not char or char.Parent == nil then return false end
+
+        -- Checked both ways on purpose: the game gates its own damage immunity
+        -- on the NAME (GameManager FindFirstChild("ForceField")), while the boss
+        -- farm matches the class.
+        local ff = char:FindFirstChildOfClass("ForceField")
+            or char:FindFirstChild("ForceField")
+        if not ff then return true end
+
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+
+        if _0xa299._0x6378 then
+            -- BEING CHAKRA SENSED. Launching 40 studs into the air in front of
+            -- someone actively watching is the one thing not to do, so walk the
+            -- shield off instead.
+            --
+            -- Driven through Humanoid:Move and re-issued every frame, because
+            -- that is the path WASD takes - MoveDirection, velocity and the walk
+            -- animation are all produced by the engine and all replicate. A
+            -- CFrame nudge would move us without any of that and read as exactly
+            -- what it is. Move() only holds for the frame it is called on.
+            if hum and hrp and hrp.Parent then
+                local flat = hrp.CFrame.LookVector * Vector3.new(1, 0, 1)
+                if flat.Magnitude > 0 then
+                    local dir = flat.Unit
+                    local stopAt = tick() + 1
+                    while tick() < stopAt and stillOn() do
+                        -- Re-read: dying or respawning mid-walk would otherwise
+                        -- keep driving a dead humanoid.
+                        local c2 = _0xa299._0x396d.Character
+                        local hum2 = c2 and c2:FindFirstChildOfClass("Humanoid")
+                        if not hum2 or hum2.Health <= 0 then break end
+                        hum2:Move(dir, false)
+                        _0xa299._0x64b8.Heartbeat:Wait()
+                    end
+                    -- Hand the controls back.
+                    pcall(function() hum:Move(Vector3.zero, false) end)
+                else
+                    task.wait(0.5)
+                end
+            else
+                task.wait(0.5)
+            end
+        else
+            -- Not watched: the quick way. Lift and let it fall; the landing is
+            -- what clears the shield.
+            if hrp and hrp.Parent then
+                pcall(function() _0xa299._0xdde2() end)
+                task.wait(0.1)
+                if hrp.Parent then
+                    hrp.CFrame = hrp.CFrame + Vector3.new(0, 40, 0)
+                end
+            end
+            task.wait(1)
+        end
+    end
+
+    return false
+end
+
 function _0xa299._0xLoadIntoGame(timeout)
     -- RE-ENTRANCY GUARD, and the actual fix for the multi-second freeze.
     --
@@ -28268,6 +28353,7 @@ _0xa299._0xb81e = {
     hiding = false,
     playerHiding = false,
     isRecoveringHP = false,
+    sheddingFF = false,        -- see _0xa299._0xHLWNShedFF
     isCollectingLoot = false,
     lootCollectionEndTime = 0,
     lastPointPosition = nil,
@@ -28686,6 +28772,31 @@ end
 -- Shared "we should not be standing out in the open right now" test. Used by
 -- both things that walk the character somewhere exposed: the Corrupted Point
 -- cycle and the boss arena visit.
+-- Start a forcefield shed if we are wearing one, and report whether the
+-- heartbeat should stand off this frame.
+--
+-- One thread at a time: the shed moves the character, so letting the heartbeat
+-- spawn a second one - or pin us while the first is mid-fall - is the same
+-- two-things-driving-the-body fight as everywhere else in this file.
+function _0xa299._0xHLWNShedFF()
+    local B = _0xa299._0xb81e
+    if B.sheddingFF then return true end
+
+    local char = _0xa299._0x396d.Character
+    if not char then return false end
+    if not (char:FindFirstChildOfClass("ForceField") or char:FindFirstChild("ForceField")) then
+        return false
+    end
+
+    B.sheddingFF = true
+    _0xa299._0x8545:Notify("Farm", "Spawn forcefield blocks HP regen - shedding it", 3, "info")
+    task.spawn(function()
+        pcall(_0xa299._0xShedForcefield, function() return B.enabled end)
+        B.sheddingFF = false
+    end)
+    return true
+end
+
 function _0xa299._0xHLWNUnsafe()
     local B = _0xa299._0xb81e
     if not B.enabled then return "farm stopped" end
@@ -30863,6 +30974,18 @@ function _0xa299._0xc0db()
             end
         end
         
+        -- FORCEFIELD BEFORE ANYTHING ELSE.
+        --
+        -- Above the HP check, not below it. Hop out below panic HP and the
+        -- rejoin hands us a spawn ForceField, which BLOCKS HP REGEN - so the
+        -- recovery hide below would pin us to the safespot forever: HP cannot
+        -- climb while the shield is up, and the per-frame pin is itself what
+        -- stops the shield clearing, because it comes off on landing.
+        --
+        -- _0xShedForcefield handles the watched case by walking it off instead
+        -- of jumping, so this is safe to run even with someone sensing us.
+        if _0xa299._0xHLWNShedFF() then return end
+
         -- Check _0xa299._0x396d HP - pause if below 30
         local humanoid = char:FindFirstChild("Humanoid")
         if _0xa299._0xb81e.isRecoveringHP then
@@ -31999,6 +32122,7 @@ function _0xa299._0xefc6()
     _0xa299._0xb81e.hiding = false
     _0xa299._0xb81e.playerHiding = false
     _0xa299._0xb81e.isRecoveringHP = false
+    _0xa299._0xb81e.sheddingFF = false
     _0xa299._0xb81e.isCollectingLoot = false
     _0xa299._0xb81e.lastPointPosition = nil
     _0xa299._0xb81e.npcSweepPos = nil
